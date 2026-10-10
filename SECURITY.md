@@ -28,7 +28,12 @@ From `docs/DESIGN.md` §8:
 - **Writes** derived files under `~/.graph-mempalace/`: the filtered exchanges, the
   chat graph's output, the configuration, one small token mark per session, a
   lock, a tool-path cache and `compound.log`.
-- **Writes** MemPalace drawers into the palace under `~/.config/mempalace/`.
+- **Writes** MemPalace drawers into this project's own palace. The default is
+  `~/.graph-mempalace/projects/<slug>/palace`, and `palace.path` overrides it. One
+  palace per project means nothing in one project's memory can reach another
+  project's. Before 0.2.0 a shared palace could be reached across projects, because
+  MemPalace digs cross-wing tunnels after every mine, and both its search without
+  `--wing` and its knowledge graph are palace-wide (verified 2026-10-10).
 - **Writes** `graphify-out/` inside the repository for the code graph, and adds that
   path to your global git excludes during setup.
 
@@ -57,10 +62,21 @@ runs Python from the installed copy of the plugin, through a bundled shell launc
 
 The plugin also declares two MCP servers, `mempalace` and `graphify`. Those are
 third-party tools that `kb-setup` installs with `uv`. They are not maintained here,
-and they run as separate local processes with your permissions. Claude Code spawns
-them directly — `mempalace-mcp` and `graphify-mcp` from your PATH, or the absolute
-path you set in `GM_MEMPALACE_MCP_BIN` / `GM_GRAPHIFY_MCP_BIN` — with no shell in
-between.
+and they run as separate local processes with your permissions.
+
+Claude Code spawns the Graphify server directly — `graphify-mcp` from your PATH, or
+the absolute path you set in `GM_GRAPHIFY_MCP_BIN` — with no shell in between. The
+MemPalace server has one step in front of it. Claude Code runs the plugin's own
+Python launcher, `scripts/mcp_launch.py`, with the interpreter named in `GM_PYTHON`.
+The launcher reads `CLAUDE_PROJECT_DIR`, then runs `mempalace-mcp --palace <that
+project's palace>`, so the server opens this project's palace and no other. It finds
+that binary on your PATH, or at the absolute path you set in `GM_MEMPALACE_MCP_BIN`.
+There is still no shell in between (verified 2026-10-10).
+
+`/graph-mempalace:kb-setup --install` writes `env.GM_PYTHON` into
+`~/.claude/settings.json`. That is a file of yours, outside the plugin, and the value
+should be an absolute path to a Python 3.11 or newer. It takes effect in your next
+session (verified 2026-10-10).
 
 ## Graph B sends exchange text through your own claude CLI
 

@@ -80,7 +80,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py.sh" "${CLAUDE_PLUGIN_ROOT}/scripts/kb_res
 ```
 
 `search` is hybrid cosine plus BM25 over the drawers, so it finds an exchange
-whose wording you remember even when no node points at it.
+whose wording you remember even when no node points at it. It covers this
+project's own palace, so an empty result means this project's history holds
+nothing on the question rather than that the words sit in another project's
+memory.
 
 Both the graph and the search come back empty: say the knowledge base has
 nothing on the question. That is a real answer, and it is the one that keeps the

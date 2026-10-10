@@ -35,7 +35,8 @@ anywhere.
 python scripts/kb_setup.py --install
 ```
 
-That installs `mempalace` and `graphify` with `uv`, initialises the palace, patches
+That installs `mempalace` and `graphify` with `uv`, writes MemPalace's own
+`config.json` (the project's palace itself is created by the first mine), patches
 graphify's Claude CLI backend, and appends `graphify-out/` to your global git
 excludes. It never installs `uv` itself; if `uv` is missing it prints the official
 one-liner for your OS and stops.
@@ -117,9 +118,20 @@ relative path that works in one fails in another.
 
 `mempalace-mcp` and `graphify-mcp` are installed by step 2 and land next to the
 other binaries (`uv tool dir --bin`, usually `~/.local/bin`). Declare them however
-your harness declares stdio servers. Two known bugs: do not pass `--palace <path>`
-(it crashes the server; the path comes from the palace config anyway), and
-`graphify-mcp` needs the `mcp` extra, which `kb_setup.py` installs.
+your harness declares stdio servers.
+
+Point the MemPalace server at one project's palace. Otherwise it opens MemPalace's
+shared default palace, and your model can read every project's memory. The plugin's
+own launcher does it two ways at once, and you can copy either: run
+`mempalace-mcp --palace <path>`, or set `MEMPALACE_PALACE_PATH` to that path in the
+server's environment. The server reads the flag, and anything it spawns picks up the
+variable, so a child process that forgets the flag still lands in the right palace.
+Verified 2026-10-10: the server starts with `--palace` and honours it.
+The `--check` run from step 2 prints the path you want, on a `[NOTE]` line reading
+`palace: <path>`.
+
+One known bug remains: `graphify-mcp` needs the `mcp` extra, which `kb_setup.py`
+installs.
 
 ## 5. Schedule the compound yourself
 
@@ -134,6 +146,10 @@ The command is the same one from step 3, without `--wait`:
 ```bash
 python <clone>/scripts/compound_run.py --project /path/to/your/repo
 ```
+
+`--only STEPS` runs part of the chain, from `filter`, `mine`, `graph_a`, `graph_b`.
+A nightly run that only needs the palace refreshed can use `--only filter,mine` and
+skip the slow chat graph.
 
 **cron** (Linux, macOS) — nightly at 03:00:
 
@@ -164,12 +180,21 @@ scheduled run that finds the lock held logs that it skipped and exits.
 ## 6. Configure, if you want to
 
 Same files, same keys as the plugin: `~/.graph-mempalace/config.toml` machine-wide,
-`<repo>/.graph-mempalace.toml` per project. See `configuration.md`. The `[session]`
-keys do nothing here, because there is no session-start hook to print anything.
+`~/.graph-mempalace/projects/<slug>/config.toml` for one project, and
+`<repo>/.graph-mempalace.toml` in the repository. See `configuration.md`. The
+`[session]` keys do nothing here, because there is no session-start hook to print
+anything.
 
-If you already have a palace wing or an exchanges folder from an earlier setup, pin
-them with `palace.wing` and `palace.exchanges_dir` rather than letting the scripts
-derive new names. `configuration.md` has the exact file.
+Every `[palace]` key — `wing`, `exchanges_dir` and `path` — is read from your own
+two files only, so a repository cannot decide where the scripts write. If you
+already have a palace wing or an exchanges folder from an earlier setup, pin them
+with `palace.wing` and `palace.exchanges_dir` in the per-project file rather than
+letting the scripts derive new names. `configuration.md` has the exact file.
+
+`palace.path` picks which palace this project writes into. It defaults to
+`~/.graph-mempalace/projects/<slug>/palace`, so each project is kept apart; two
+projects given the same path share one palace. `configuration.md` names the file
+that key belongs in.
 
 ## What is not automatic here
 

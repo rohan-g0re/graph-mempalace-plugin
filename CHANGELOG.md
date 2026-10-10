@@ -7,14 +7,51 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions are pinned: Claude Code treats `version` in `plugin.json` as the signal
 that an update exists, so a release bumps it and adds an entry here in one commit.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-10
 
 ### Added
 
+- `palace.path` configuration key, set in the user-side layers only:
+  `~/.graph-mempalace/config.toml` for the machine, or
+  `~/.graph-mempalace/projects/<slug>/config.toml` for one project.
+- `compound_run.py --only STEPS` — run only the named steps. `STEPS` is a comma
+  list drawn from `filter`, `mine`, `graph_a` and `graph_b`.
+- `scripts/mcp_launch.py` — starts the MemPalace MCP server in this project's
+  palace.
+- `kb_resolve.py doctor` reports `palace`: the palace path in use. It reads
+  "not built yet" until the first compound.
+- `kb_resolve.py doctor` reports `palace reachable`: the wings that palace holds.
+- `kb_resolve.py doctor` reports `dialogue wing present`, with the detail
+  `exists only in the shared 0.1.0 palace - fix: /graph-mempalace:kb-compound (moves it)`
+  when the wing is still in the old palace.
 - `kb_resolve.py doctor` reports `no stale drawers`: drawers whose source file
   is gitignored or gone, counted with `mempalace sync --dry-run --wing <wing>`,
-  with the exact `--apply` line as the fix. Skipped when the installed
-  MemPalace prints no sync report.
+  with the exact `--apply` line as the fix. That fix line now carries
+  `--palace`. Skipped when the installed MemPalace prints no sync report.
+- `kb_setup.py --check` prints an `mcp launcher python` row and a
+  `palace: <path>` note.
+- Upgrading from 0.1.0 needs no hand work. The first session after the upgrade
+  says it is moving this project's memory, then runs a mine-only compound in the
+  background that files the existing exchanges into the new palace. Graphs are
+  left alone, and the old shared palace is untouched.
+
+### Changed
+
+- One MemPalace palace per project, instead of one palace for the machine. The
+  default is `~/.graph-mempalace/projects/<slug>/palace`, and `palace.path`
+  overrides it. A shared palace let a session in one project reach another
+  project's memory: MemPalace digs cross-wing tunnels after every mine, and both
+  `mempalace search` without `--wing` and its knowledge graph are palace-wide.
+- Every MemPalace call the plugin makes passes the global `--palace <path>` flag
+  before the subcommand, and runs with `MEMPALACE_PALACE_PATH` set to the same
+  path.
+- The MemPalace MCP server is launched through the plugin, by
+  `scripts/mcp_launch.py`, instead of being spawned directly. Its `.mcp.json`
+  `command` is `${GM_PYTHON:-python}`. The launcher reads `CLAUDE_PROJECT_DIR`
+  and runs `mempalace-mcp --palace <that project's palace>`. The Graphify MCP
+  server is unchanged.
+- `/graph-mempalace:kb-setup --install` writes `env.GM_PYTHON` into
+  `~/.claude/settings.json`. It takes effect in the next session.
 
 ### Fixed
 
@@ -67,5 +104,6 @@ First release. Everything below is new.
   `docs/configuration.md`, `docs/manual-setup.md`, `AGENTS.md`, `CONTRIBUTING.md`
   and `SECURITY.md`, plus the two reference documents the design came from.
 
-[Unreleased]: https://github.com/rohan-g0re/graph-mempalace-plugin/compare/graph-mempalace--v0.1.0...HEAD
+[Unreleased]: https://github.com/rohan-g0re/graph-mempalace-plugin/compare/graph-mempalace--v0.2.0...HEAD
+[0.2.0]: https://github.com/rohan-g0re/graph-mempalace-plugin/compare/graph-mempalace--v0.1.0...graph-mempalace--v0.2.0
 [0.1.0]: https://github.com/rohan-g0re/graph-mempalace-plugin/releases/tag/graph-mempalace--v0.1.0

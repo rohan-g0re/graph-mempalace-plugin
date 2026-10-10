@@ -16,7 +16,8 @@ Four MemPalace MCP tools cover it.
 
 The plugin's server is namespaced, so the full tool names are
 `mcp__plugin_graph-mempalace_mempalace__mempalace_add_drawer` and so on for the
-other three.
+other three. That server is pointed at this project's palace when it starts, so
+a write through these tools lands in this project's palace.
 
 ## Supersede against invalidate
 
@@ -38,9 +39,12 @@ yours to make at the moment the fact changes.
 
 ## Where the writes land
 
-Drawers for this project go in its own wing. `kb-doctor` prints the wing name in
-use; `palace.wing` in `~/.graph-mempalace/config.toml`, or in
-`<repo>/.graph-mempalace.toml`, pins it to an existing one.
+Drawers for this project go in its own wing, inside this project's own palace —
+`~/.graph-mempalace/projects/<slug>/palace` by default. A write here stays in
+this project's memory. `kb-doctor` prints the palace and the wing in use.
+`palace.wing` pins the wing to an existing one, set either in
+`~/.graph-mempalace/config.toml` for the whole machine or in
+`~/.graph-mempalace/projects/<slug>/config.toml` for this project.
 
 ## Keep compression off
 

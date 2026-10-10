@@ -12,27 +12,29 @@ supplies what was actually said or written.
 | domain | navigation | ground truth |
 |---|---|---|
 | code | Graph A — Graphify over the repo | the repository itself, `file:line` |
-| chat | Graph B — Graphify over filtered dialogue | MemPalace drawers, keyed by exchange id |
+| chat | Graph B — Graphify over filtered dialogue | MemPalace drawers in this project's own palace, keyed by exchange id |
 
 ```
-                 question
-                    │
-         ┌──────────┴───────────┐
-         ▼                      ▼
-   ┌───────────┐          ┌───────────┐
-   │  Graph A  │          │  Graph B  │      navigation
-   │   code    │          │   chat    │
-   └─────┬─────┘          └─────┬─────┘
-         │ source_file          │ exchange id
-         ▼                      ▼
-   ┌───────────┐          ┌───────────┐
-   │ the repo  │          │ MemPalace │      ground truth
-   │ file:line │          │  drawers  │
-   └───────────┘          └───────────┘
+                     question
+                         │
+           ┌─────────────┴─────────────┐
+           ▼                           ▼
+   ┌────────────────┐          ┌────────────────┐
+   │    Graph A     │          │    Graph B     │     navigation
+   │      code      │          │      chat      │
+   └───────┬────────┘          └───────┬────────┘
+           │ source_file               │ exchange id
+           ▼                           ▼
+   ┌────────────────┐          ┌────────────────┐
+   │    the repo    │          │ this project's │     ground truth
+   │   file:line    │          │ palace drawers │
+   └────────────────┘          └────────────────┘
 ```
 
 `kb_resolve.py` is the wiring. It runs the graph query, reads the back-pointer off
-each node it gets, and dereferences it.
+each node it gets, and dereferences it. A question goes to a graph, the graph
+routes, and on the chat side the dereference lands in this project's own palace
+and nowhere else — see **One palace per project**.
 
 ## The one rule
 
@@ -103,6 +105,38 @@ only, and a code answer sends you to a file.
 This asymmetry is the most important decision in the design, and it took a while to
 see.
 
+## One palace per project
+
+A palace is MemPalace's store — the directory it writes the drawers into. Before
+0.2.0 every project on a machine shared one.
+
+That leaked. MemPalace digs cross-wing tunnels after every `mine` — topic tunnels
+and entity tunnels — and no flag turns it off. `mempalace search` without
+`--wing` is palace-wide, and so is its knowledge graph. MCP tools can walk
+tunnels. So a session in project A could reach project B's memory.
+
+It is not theoretical. In a live run on one machine, two unrelated projects had
+six entity tunnels between them, labelled
+`shared entity: Python / Chrome / Claude Code / ...`.
+
+The fix is one palace each. A project's palace directory is
+`~/.graph-mempalace/projects/<slug>/palace` by default. Every MemPalace call the
+plugin makes passes the global `--palace <path>` flag before the subcommand, and
+runs with `MEMPALACE_PALACE_PATH` set to the same path, so no call and no child
+process can land in the shared default. MemPalace keeps `tunnels.json` beside the
+palace directory and its knowledge-graph sqlite inside it, so tunnels and the
+knowledge graph are per project too. A palace holding one project has nothing to
+tunnel to.
+
+Sharing is still possible on purpose: two projects given the same `palace.path`
+share one palace.
+
+One door is left open. The Graphify MCP server reads the current project's graph
+by default, and its `project_path` argument can name another folder. The plugin
+does not close that.
+
+Verified 2026-10-10.
+
 ## Graph B and the token budget
 
 Graph B needs a model, because prose has no tree-sitter. Extraction runs through the
@@ -152,9 +186,9 @@ list.
 10. **Review what gets filed.** There is no write gating on mining.
 11. **Secrets leak through mining.** Use `.graphifyignore`, and check what was
     picked up before sharing a palace.
-12. **Two compounds collide.** A forced compound and a manual run share one palace
-    and one `graphify-out/`. The lock is the guard; never delete it while a mine or
-    an extraction is alive.
+12. **Two compounds collide.** Within one project, a forced compound and a manual
+    run share that project's palace and one `graphify-out/`. The lock is the guard;
+    never delete it while a mine or an extraction is alive.
 13. **Compaction strands a growth watermark** unless the gate re-seeds when the token
     count drops below it.
 14. **A timed-out Claude CLI call leaves an orphan on Windows.** The timeout kills
@@ -173,4 +207,8 @@ list.
 - **State is in `~/.graph-mempalace/`, not in the plugin directory.** The plugin root
   carries the version as a path segment, so it changes on every update — and users
   need to be able to find and edit their own config.
+- **The MemPalace MCP server starts through a launcher.** `scripts/mcp_launch.py`
+  reads `CLAUDE_PROJECT_DIR` and runs `mempalace-mcp --palace <that project's
+  palace>`. A per-project path cannot be written into a static `.mcp.json`, so
+  something has to compute it at spawn time.
 - **One lock, machine-wide.** A mine and an extraction must never run at once.

@@ -6,6 +6,16 @@ and every trap that cost us a rebuild.
 
 Written for: an engineer (or an agent) setting this up from nothing.
 
+**Scope note, 2026-10-10.** This is the pre-plugin write-up, kept as the research
+each rule came from. It describes one MemPalace palace shared by every project on a
+machine. From plugin version 0.2.0 each project has its own palace, and every
+`mempalace` call the plugin makes carries the global `--palace <path>` flag before
+the subcommand, with `MEMPALACE_PALACE_PATH` set for any process that cannot take
+the flag. The warnings further down against passing `--palace` were recorded against
+the MCP servers on MemPalace 3.10.0, not against the CLI. The commands below are
+left as they were written. `docs/configuration.md` and `docs/DESIGN.md` are the
+current word on paths and configuration.
+
 ---
 
 ## 1. The idea in one page
@@ -559,9 +569,11 @@ and never reaches 100%.
 
 Two bugs you will hit:
 
-- **`--palace <path>` crashes `mempalace-*-mcp`**: `AttributeError: property
-  'palace_path' of 'MempalaceConfig' object has no setter`. Omit it; the path
-  comes from `config.json` anyway.
+- **`--palace <path>` on `mempalace-*-mcp`** once crashed with `AttributeError:
+  property 'palace_path' of 'MempalaceConfig' object has no setter`. Verified
+  working on MemPalace 3.10.0 (entry point `mempalace.mcp_proxy`) on 2026-10-10;
+  the plugin's launcher relies on it. In this snapshot the path comes from
+  `config.json`.
 - **`graphify-mcp` needs the `mcp` extra** or it dies with
   `ModuleNotFoundError: No module named 'mcp'`.
 

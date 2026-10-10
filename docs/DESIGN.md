@@ -18,11 +18,12 @@ Two graphs for navigation, two stores for truth:
 | code | Graph A, Graphify over the repo | the repository, `file:line` |
 | chat | Graph B, Graphify over filtered dialogue | MemPalace drawers, keyed by exchange id |
 
-The graph routes; it never answers. Code is never copied into MemPalace. The
-plugin ingests Claude Code's own transcripts for the current project (one file per
-exchange, stable ids), mines them into MemPalace, builds both graphs, and keeps
-them current by itself: every 100k tokens of session growth, at compaction, and on
-the first session in a project it has never seen.
+The graph routes; it never answers. Code is never copied into MemPalace. The chat
+ground truth is MemPalace drawers inside this project's own palace, and there is
+one palace per project. The plugin ingests Claude Code's own transcripts for the
+current project (one file per exchange, stable ids), mines them into MemPalace,
+builds both graphs, and keeps them current by itself: every 100k tokens of session
+growth, at compaction, and on the first session in a project it has never seen.
 
 Zero per-project setup is a hard requirement. A user installs the plugin once per
 machine, opens any repo, and the knowledge base starts accumulating.
@@ -48,7 +49,7 @@ No colons, no `claude`/`anthropic` in any name (validator rules). Kebab-case.
 .claude-plugin/plugin.json          name, version, description, author, homepage, repository, license, keywords
 .claude-plugin/marketplace.json     name graph-mempalace, owner, plugins: [{name: graph-mempalace, source: "./"}]
 hooks/hooks.json                    WRAPPED in top-level "hooks": SessionStart, Stop, PreCompact
-.mcp.json                           mempalace-mcp + graphify-mcp launched directly (${GM_*_MCP_BIN:-name})
+.mcp.json                           mempalace-mcp via ${GM_PYTHON:-python} + mcp_launch.py; graphify-mcp direct (${GM_GRAPHIFY_MCP_BIN:-graphify-mcp})
 scripts/
   py.sh                             POSIX launcher: finds a Python >= 3.11 (python3/python/py -3, then uv), caches it
   gm_common.py                      shared: paths, slug, config, lock, log, tool discovery, detached spawn
@@ -59,6 +60,7 @@ scripts/
   kb_resolve.py                     ask / get / search / doctor (graph -> exchange / file)
   kb_setup.py                       prerequisites: check, install (uv tool), mempalace init, patch, gitignore
   patch_graphify.py                 idempotent --strict-mcp-config patch for graphify's claude-cli backend
+  mcp_launch.py                     MCP launcher: reads CLAUDE_PROJECT_DIR, runs mempalace-mcp --palace <that project's palace>
 skills/
   graph-mempalace/SKILL.md          model-invoked: how to use the KB; references/*.md for depth
   kb-setup/SKILL.md                 user-invoked (disable-model-invocation: true)
@@ -104,6 +106,14 @@ No `CLAUDE.md` at the plugin root: the validator warns on it and CI runs
   user-invoked only. Namespaced as `graph-mempalace:<skill>`.
 - MCP `.mcp.json` at plugin root; `command` may be any binary on PATH or a bundled
   script; nothing installs it for you.
+- Claude Code sets `CLAUDE_PROJECT_DIR`, and it starts a plugin's MCP server
+  inside the project directory. That is how a per-project MCP server learns
+  which project it serves.
+- The `env` block in `~/.claude/settings.json` reaches `.mcp.json` variable
+  expansion and the server process's own environment. It takes effect in the
+  next session, not the running one.
+- `/graph-mempalace:kb-setup --install` writes `env.GM_PYTHON` there for that
+  reason.
 - Marketplace in the same repo: `.claude-plugin/marketplace.json` with one entry,
   `source: "./"`, entry name identical to plugin name. Users:
   `/plugin marketplace add rohan-g0re/graph-mempalace-plugin` then
@@ -182,11 +192,13 @@ slug_for(project_dir) -> str              Claude Code's ~/.claude/projects folde
 transcripts_dir(project_dir) -> Path
 project_state_dir(project_dir) -> Path    ~/.graph-mempalace/projects/<slug>
 exchanges_dir(project_dir, cfg) -> Path   override or project_state_dir/exchanges
+palace_path(project_dir, cfg) -> Path     override or project_state_dir/palace; one palace per project
 wing_for(project_dir, cfg) -> str         override, else <token>_dialogue, else <token>_<hash6>_dialogue on collision
+mempalace_argv(project_dir, cfg, *sub) -> list[str] | None   mempalace --palace <palace> <sub...>; None when mempalace is missing
 graph_a_path(project_dir) -> Path         <repo>/graphify-out/graph.json
 graph_b_path(project_dir, cfg) -> Path    <exchanges_dir>/graphify-out/graph.json
 find_tool(name) -> str | None             $GM_<NAME>_BIN, ~/.local/bin/<name>(.exe), `uv tool dir --bin`, PATH
-tool_env(cfg) -> dict                     GRAPHIFY_* variables for graphify runs
+tool_env(cfg, project_dir) -> dict        GRAPHIFY_* for graphify runs; MEMPALACE_PALACE_PATH for a project
 lock_acquire() / lock_held(stale_hours) -> bool
 lock_touch()                              heartbeat: the chain refreshes the lock between steps
 lock_release(force=False)                 unlinks only when the lock file's pid is this process
@@ -198,10 +210,19 @@ spawn_detached(argv, log_path)            Windows DETACHED_PROCESS|CREATE_NO_WIN
 
 Rules that came out of the live run and the adversarial review (2026-10-10):
 
-- `[palace]` is read from the user config only. A repository's
-  `.graph-mempalace.toml` cannot choose where the plugin writes or which wing it
-  mines into. `palace.wing` must match `[A-Za-z0-9._-]{1,64}`;
-  `palace.exchanges_dir` must be absolute (`~` allowed).
+- `[palace]` is read from the user config only, all three keys: `wing`,
+  `exchanges_dir` and `path`. A repository's `.graph-mempalace.toml` cannot
+  choose which palace the plugin writes to, where it puts the exchanges, or
+  which wing it mines into. `palace.wing` must match `[A-Za-z0-9._-]{1,64}`;
+  `palace.exchanges_dir` and `palace.path` must be absolute (`~` allowed).
+- One palace per project. Every MemPalace call the plugin makes carries the
+  global `--palace` flag before the subcommand, and runs with
+  `MEMPALACE_PALACE_PATH` set to the same path. The reason is isolation:
+  MemPalace digs cross-wing tunnels after every mine, and its `search` without
+  `--wing` and its knowledge graph are palace-wide. A palace that holds one
+  project has nothing to tunnel to. MemPalace keeps `tunnels.json` beside the
+  palace directory and its knowledge-graph sqlite inside it, so both are per
+  project too.
 - `find_tool` also looks in the uv tool environments themselves
   (`AppData/Roaming/uv/tools/<tool>/Scripts`, `.local/share/uv/tools/<tool>/bin`)
   and remembers resolved paths in `~/.graph-mempalace/tools.json`, so the
@@ -231,9 +252,14 @@ Rules that came out of the live run and the adversarial review (2026-10-10):
 - Graph A lands in `<repo>/graphify-out/`; the chain adds that line to the
   repo's local `.git/info/exclude` (never to a tracked file) so `git status`
   stays clean. `kb_setup --install` also adds it to the global excludes.
-- `.mcp.json` launches the MCP binaries directly (`${GM_MEMPALACE_MCP_BIN:-mempalace-mcp}`),
-  never through `bash`: on Windows `bash` on PATH is commonly the WSL/Store shim
-  and the servers failed to connect that way in a live run.
+- `.mcp.json` starts the MemPalace server through `scripts/mcp_launch.py`, with
+  `command` set to `${GM_PYTHON:-python}`. A per-project palace path cannot be
+  written into a static `.mcp.json`, so something has to work it out at spawn
+  time. Graphify's server is still launched directly
+  (`${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}`). The launcher is Python, not a shell
+  script: a bash launcher was tried and rejected, because on Windows `bash` on
+  PATH is commonly the WSL/Store shim and the servers failed to connect that way
+  in a live run.
 
 Python >= 3.11 (tomllib). Standard library only. Every function has a docstring
 that says what it reads and writes.
@@ -243,9 +269,10 @@ that says what it reads and writes.
 TOML, parsed with the standard library. Missing file = all defaults. Three
 layers, later wins: the user file above; a user-side per-project file
 `~/.graph-mempalace/projects/<slug>/config.toml` (may set anything); the repo's
-`.graph-mempalace.toml` (may set anything except `[palace]`). Unknown keys produce
-a single stderr warning naming the key; wrong types fall back to the default with
-a warning. These are the keys and defaults:
+`.graph-mempalace.toml` (may set anything except `[palace]`). `[palace]` is
+user-config only in all three keys — `wing`, `exchanges_dir` and `path`. Unknown
+keys produce a single stderr warning naming the key; wrong types fall back to the
+default with a warning. These are the keys and defaults:
 
 ```toml
 [compound]
@@ -269,6 +296,7 @@ cluster = true                # name communities after extraction
 [palace]
 wing = ""                     # "" = derive; set to keep an existing wing name
 exchanges_dir = ""            # "" = ~/.graph-mempalace/projects/<slug>/exchanges
+path = ""                     # "" = ~/.graph-mempalace/projects/<slug>/palace; one palace per project
 
 [session]
 inject_instructions = true    # print the "how to use the KB" block at SessionStart
@@ -326,12 +354,15 @@ Unchanged logic from the proven version, re-pointed at `gm_common`:
 Python, not a shell `&&` string, so it is identical on every OS and can log,
 retry and clean up. Arguments: `--project <dir>` (default cwd), `--wait` (run in
 the foreground and print a human summary; used by `/kb-compound`), `--no-graph-a`,
-`--no-graph-b`, `--json`.
+`--no-graph-b`, `--json`, `--only <steps>` (a comma list drawn from `filter`,
+`mine`, `graph_a`, `graph_b`; runs only those steps). `--only` is for a pass that
+needs part of the chain: the one-time 0.1.0 palace move runs `--only mine`.
 
 1. `lock_acquire()`; if held and fresh, print and exit 0. Everything below is in
    `try/finally: lock_release()`.
 2. Filter: `filter_transcripts.py <transcripts> <exchanges>`.
-3. Mine: `mempalace mine <exchanges> --mode projects --wing <wing>`.
+3. Mine: `mempalace --palace <palace> mine <exchanges> --mode projects --wing <wing>`.
+   `--palace` is a global flag, so it comes before the subcommand.
 4. Graph A: if `graphify-out/graph.json` is missing under the repo, `graphify . --code-only`;
    else `graphify update .`. If `graph_a.mode == "full"`, run `graphify . --backend claude-cli ...`
    instead. `cluster-only` if `graph_a.cluster`.
@@ -352,29 +383,50 @@ concurrently — the lock guarantees this within the plugin.
 As shipped and verified: `ask`, `get`, `search`, `doctor`. Re-pointed at
 `gm_common` for paths and tool discovery; stdout forced to UTF-8.
 
+`doctor` checks the palace too (verified 2026-10-10). `palace` prints the path in
+use, and reads `not built yet` until the first compound. `palace reachable` lists
+that palace's wings. `dialogue wing present` carries the detail
+`exists only in the shared 0.1.0 palace - fix: /graph-mempalace:kb-compound (moves it)`
+when that applies. The fix line for `no stale drawers` now includes `--palace`.
+
 ### 5.8 Prerequisites — `scripts/kb_setup.py`
 
 `--check` prints a table (uv, mempalace, graphify, python >= 3.11, mempalace
-config, graphify patch, global gitignore) with OK/MISSING and the fix for each.
+config, graphify patch, global gitignore, mcp launcher python) with OK/MISSING and
+the fix for each, plus a `[NOTE]` line, `palace: <path>`.
 `--install` performs the fixes it can: `uv tool install mempalace`,
 `uv tool install "graphifyy[pdf,sql,mcp]"`, `mempalace init <cwd> --yes --no-llm`,
-`patch_graphify.py`, append `graphify-out/` to the global git excludes file. It
-never installs `uv` itself; it prints the official one-liner for the user's OS.
+`patch_graphify.py`, append `graphify-out/` to the global git excludes file, and
+write `env.GM_PYTHON` into `~/.claude/settings.json`. It never installs `uv`
+itself; it prints the official one-liner for the user's OS.
 
 ### 5.9 MCP servers
 
-`.mcp.json` declares `mempalace` and `graphify` and launches the binaries
-directly: `${GM_MEMPALACE_MCP_BIN:-mempalace-mcp}` and
-`${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}`, no shell in between. uv puts both on the
-user's PATH (`~/.local/bin`), which is what Claude Code's MCP spawn sees on
-Windows and on a terminal-launched Claude Code on macOS/Linux. When PATH is not
-enough (a GUI-launched editor on macOS has a minimal PATH), the user sets the two
-`GM_*_MCP_BIN` variables to absolute paths in `~/.claude/settings.json` under
-`"env"`; `kb-doctor` prints the exact lines. A bash launcher was tried first and
-rejected: on Windows `bash` on PATH is commonly the WSL/Store shim, and the
-servers failed to connect in a live run. Full `mempalace-mcp`, not the light one:
-fetch-by-id and the KG write tools (`kg_add`, `kg_supersede`, `kg_invalidate`)
-are the reason.
+`.mcp.json` declares `mempalace` and `graphify`.
+
+The MemPalace server is started through `scripts/mcp_launch.py`. The `command` is
+`${GM_PYTHON:-python}`; the launcher reads `CLAUDE_PROJECT_DIR` and runs
+`mempalace-mcp --palace <that project's palace>`. A launcher is needed because a
+per-project palace path cannot be written into a static `.mcp.json`, so something
+has to compute it at spawn time. It is Python and not a shell script for one
+reason: a bash launcher was tried first and rejected, because on Windows `bash` on
+PATH is commonly the WSL/Store shim and the servers failed to connect in a live
+run. `GM_PYTHON` should be an absolute path to a Python 3.11 or newer;
+`/graph-mempalace:kb-setup --install` writes it into `~/.claude/settings.json`
+under `"env"`, and it takes effect in the next session. The launcher finds
+`mempalace-mcp` the same way every other tool is found, so `GM_MEMPALACE_MCP_BIN`
+still names it by absolute path when PATH cannot reach it. Full `mempalace-mcp`,
+not the light one: fetch-by-id and the KG write tools (`kg_add`, `kg_supersede`,
+`kg_invalidate`) are the reason.
+
+Graphify's server is unchanged: `${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}`, no shell
+in between. uv puts it on the user's PATH (`~/.local/bin`), which is what Claude
+Code's MCP spawn sees on Windows and on a terminal-launched Claude Code on
+macOS/Linux. When PATH is not enough (a GUI-launched editor on macOS has a minimal
+PATH), the user sets `GM_GRAPHIFY_MCP_BIN` to an absolute path in
+`~/.claude/settings.json` under `"env"`; `kb-doctor` prints the exact lines. It
+reads the current project's graph by default, and its `project_path` argument can
+name another folder. That is the one door the plugin does not close.
 
 ## 6. Skills
 
@@ -404,14 +456,17 @@ ubuntu/windows/macos × Python 3.11/3.12.
 
 - The plugin reads Claude Code transcripts for the current project only
   (`~/.claude/projects/<slug>/*.jsonl`) and writes derived files under
-  `~/.graph-mempalace/` and the MemPalace palace under `~/.config/mempalace/`.
+  `~/.graph-mempalace/` and this project's own palace,
+  `~/.graph-mempalace/projects/<slug>/palace` by default. Nothing in one
+  project's memory can reach another project's.
 - Graph B extraction sends exchange text to Claude through the user's own
   `claude` CLI session (same account, same terms); nothing else leaves the machine.
 - Hooks never block a session: they exit 0 on every error and log to
   `~/.graph-mempalace/compound.log`.
 - Compounding runs detached in the background; a lock prevents two at once.
-- Uninstall: `/plugin uninstall graph-mempalace`; delete `~/.graph-mempalace/` and
-  the palace wing by hand if wanted.
+- Uninstall: `/plugin uninstall graph-mempalace`; delete `~/.graph-mempalace/` by
+  hand if wanted, which takes the default palace with it. A palace moved
+  elsewhere with `palace.path` has to be deleted by hand.
 
 ## 8b. Migrating from the manual setup (the originating project)
 
@@ -425,8 +480,23 @@ the exchanges folder (`~/.mempalace/dialogue/<slug>`) are kept by setting
 `.graph-mempalace.toml`, which may not set `[palace]`. `docs/configuration.md`
 shows the exact file.
 
-## 9. Out of scope for v0.1
+Upgrading from 0.1.0 also seeds this project's own palace. The first session after
+the upgrade moves that project's memory into it in the background. There is
+nothing to do by hand. It is a mine-only compound (`compound_run.py --only mine`),
+so the graphs are left alone, and the session announces it with one line:
+
+```
+graph-mempalace: moving this project's memory into its own palace in the background (one-time, a few minutes)
+```
+
+The old shared palace — MemPalace's default, usually `~/.config/mempalace/palace`
+or `~/.mempalace/palace` — is left untouched, and its old wings can be ignored. A
+user's own global MemPalace MCP server entry in `~/.claude.json`, if they keep
+one, still points at the shared palace. That is outside the plugin.
+
+## 9. Out of scope for v0.2
 
 Cross-harness installers (Codex, Cursor) beyond `docs/manual-setup.md`; an eval
-suite; a stub MCP server when prerequisites are missing; migrating an existing
-palace wing (documented as a config override instead).
+suite; a stub MCP server when prerequisites are missing; moving a palace wing
+anywhere a user asks (`[palace]` is the config override, and the one-time 0.1.0
+palace move is the only migration the plugin runs by itself).

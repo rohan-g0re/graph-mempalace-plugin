@@ -1,6 +1,6 @@
 {
   "name": "graph-mempalace",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Builds a knowledge base from a project's own conversation transcripts and code, and answers questions about past work from the verbatim exchange or the file rather than from a summary.",
   "author": {
     "name": "rohan-g0re",

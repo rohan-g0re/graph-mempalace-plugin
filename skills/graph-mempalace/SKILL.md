@@ -64,4 +64,4 @@ Compounding is automatic. `/graph-mempalace:kb-compound` runs it now.
 
 - `references/answering.md` — reading `ask` output, the `EXTRACTED`/`INFERRED`/`AMBIGUOUS` edge tags, truncation and widening the budget, falling back to `search`.
 - `references/writing-back.md` — filing a durable outcome or a new fact with the MemPalace MCP tools, and choosing between supersede and invalidate.
-- `references/troubleshooting.md` — missing prerequisites, an empty knowledge base, a held lock, a duplicate wing, MCP servers that will not connect.
+- `references/troubleshooting.md` — missing prerequisites, an empty knowledge base, a held lock, a duplicate wing, answers that look like another project's, MCP servers that will not connect.

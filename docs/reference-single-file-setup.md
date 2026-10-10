@@ -4,6 +4,16 @@
 project. Built 2026-10-07 from the working setup in `statusneo_assignment`; every
 embedded file is a byte-for-byte copy of what runs there.*
 
+**Scope note, 2026-10-10.** This file is a dated snapshot and is left as it was
+written, so following it builds one MemPalace palace shared by every project. From
+plugin version 0.2.0 the plugin instead gives each project its own palace, and every
+`mempalace` call it makes carries the global `--palace <path>` flag before the
+subcommand, with `MEMPALACE_PALACE_PATH` set for any process that cannot take the
+flag. The warnings further down against passing `--palace` were recorded against the
+MCP servers on MemPalace 3.10.0, not against the CLI. Stand this up and later
+install the plugin and you will have two palace layouts; `docs/configuration.md`
+explains the current one.
+
 ---
 
 ## 0. How to use this file
@@ -1875,9 +1885,11 @@ and never reaches 100%.
 
 Two bugs you will hit:
 
-- **`--palace <path>` crashes `mempalace-*-mcp`**: `AttributeError: property
-  'palace_path' of 'MempalaceConfig' object has no setter`. Omit it; the path
-  comes from `config.json` anyway.
+- **`--palace <path>` on `mempalace-*-mcp`** once crashed with `AttributeError:
+  property 'palace_path' of 'MempalaceConfig' object has no setter`. Verified
+  working on MemPalace 3.10.0 (entry point `mempalace.mcp_proxy`) on 2026-10-10;
+  the plugin's launcher relies on it. In this snapshot the path comes from
+  `config.json`.
 - **`graphify-mcp` needs the `mcp` extra** or it dies with
   `ModuleNotFoundError: No module named 'mcp'`.
 
@@ -1998,8 +2010,9 @@ Wired: the **full** `mempalace-mcp` and `graphify-mcp`, both with `args: []`.
 The full server rather than the light one because it exposes fetch-by-id
 (`get_drawer`) and the knowledge-graph write tools (`kg_add`, `kg_supersede`,
 `kg_invalidate`), which the light server folds away; the extra schema tokens
-are the price. No `--palace` flag because it crashes 3.10.0 (Part 10); the
-path comes from `config.json`, written by `mempalace init`. Any earlier
+are the price. No `--palace` flag in this snapshot (Part 10 records the crash
+seen at the time; the flag works on 3.10.0 as of 2026-10-10 and the plugin uses
+it); here the path comes from `config.json`, written by `mempalace init`. Any earlier
 project-local "memory" MCP server over a generated file should be removed —
 one memory system, not three. `.mcp.json` changes need a session restart.
 
