@@ -277,7 +277,7 @@ def test_a_project_config_may_not_set_palace(gm, project, write_project_config,
     cfg = gm.load_config(project)
     err = capsys.readouterr().err
     assert "[palace] is read from" in err and "ignored here" in err
-    assert cfg["palace"] == {"wing": "", "exchanges_dir": ""}
+    assert cfg["palace"] == {"wing": "", "exchanges_dir": "", "path": ""}
 
 
 def test_a_project_config_may_still_set_other_sections(gm, project,
@@ -289,6 +289,74 @@ def test_a_project_config_may_still_set_other_sections(gm, project,
 def test_graph_paths(gm, project):
     assert gm.graph_a_path(project) == Path(project) / "graphify-out" / "graph.json"
     assert gm.graph_b_path(project) == gm.exchanges_dir(project) / "graphify-out" / "graph.json"
+
+
+# ---------------------------------------------------------------- palace_path
+# One palace per project is the isolation guarantee: MemPalace's search, its
+# knowledge graph and the tunnels it digs after a mine never leave a palace.
+
+def test_palace_path_default_sits_inside_the_project_state_dir(gm, project):
+    assert gm.palace_path(project) == gm.project_state_dir(project) / "palace"
+
+
+def test_two_projects_get_two_palaces(gm, tmp_path):
+    a, b = tmp_path / "alpha", tmp_path / "beta"
+    a.mkdir(); b.mkdir()
+    assert gm.palace_path(a) != gm.palace_path(b)
+
+
+def test_palace_path_is_never_created_by_asking_for_it(gm, project):
+    assert not gm.palace_path(project).exists()
+
+
+def test_palace_path_override_from_the_user_config(gm, project, write_config, tmp_path):
+    shared = tmp_path / "one-shared-palace"
+    write_config(f'[palace]\npath = "{shared.as_posix()}"\n')
+    assert gm.palace_path(project) == shared
+
+
+def test_palace_path_override_from_the_per_project_user_layer(gm, project, tmp_path):
+    pinned = tmp_path / "pinned"
+    path = gm.project_config_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[palace]\npath = "{pinned.as_posix()}"\n', encoding="utf-8")
+    assert gm.palace_path(project) == pinned
+
+
+def test_a_relative_palace_path_is_refused(gm, project, write_config, capsys):
+    write_config('[palace]\npath = "somewhere/else"\n')
+    cfg = gm.load_config(project)
+    assert "palace.path must be an absolute path" in capsys.readouterr().err
+    assert cfg["palace"]["path"] == ""
+    assert gm.palace_path(project, cfg) == gm.project_state_dir(project) / "palace"
+
+
+def test_a_repo_config_cannot_move_the_palace(gm, project, write_project_config, capsys):
+    write_project_config(project, '[palace]\npath = "/tmp/hijacked"\n')
+    cfg = gm.load_config(project)
+    assert "ignored here" in capsys.readouterr().err
+    assert gm.palace_path(project, cfg) == gm.project_state_dir(project) / "palace"
+
+
+def test_mempalace_argv_puts_the_global_palace_flag_before_the_subcommand(
+        gm, project, tmp_path, monkeypatch, empty_path, make_tool):
+    exe = make_tool(tmp_path / "bins", "mempalace")
+    monkeypatch.setenv("GM_MEMPALACE_BIN", str(exe))
+    gm._FIND_TOOL_CACHE.clear()
+    argv = gm.mempalace_argv(project, None, "mine", "somewhere", "--wing", "w")
+    assert argv == [str(exe), "--palace", str(gm.palace_path(project)),
+                    "mine", "somewhere", "--wing", "w"]
+
+
+def test_mempalace_argv_is_none_when_mempalace_is_missing(gm, project, empty_path):
+    assert gm.mempalace_argv(project, None, "status") is None
+
+
+def test_tool_env_names_the_palace_only_when_given_a_project(gm, project, monkeypatch):
+    monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
+    assert "MEMPALACE_PALACE_PATH" not in gm.tool_env(gm.load_config(project))
+    env = gm.tool_env(gm.load_config(project), project)
+    assert env["MEMPALACE_PALACE_PATH"] == str(gm.palace_path(project))
 
 
 # ------------------------------------------------------------------- wing_for

@@ -5,7 +5,7 @@ compound chain and the resolver agree by construction on:
 
   * where Claude Code keeps this project's transcripts
   * where the filtered exchanges and Graph B live
-  * which MemPalace wing the project's exchanges are filed in
+  * which MemPalace palace (one per project) and wing the exchanges are filed in
   * which configuration values are in force
   * where the lock, the watermark and the log are
 
@@ -81,6 +81,11 @@ DEFAULTS: dict[str, dict[str, object]] = {
     "palace": {
         "wing": "",
         "exchanges_dir": "",
+        # The MemPalace palace (its database) for THIS project. Empty means
+        # ~/.graph-mempalace/projects/<slug>/palace: one palace per project, so
+        # nothing in one project's memory can reach another's. An absolute path
+        # pins it; several projects given the same path share one palace.
+        "path": "",
     },
     "session": {
         "inject_instructions": True,
@@ -198,14 +203,17 @@ def load_config(project_dir: str | os.PathLike | None = None) -> dict:
     if wing and not WING_RE.match(wing):
         _warn("palace.wing must match [A-Za-z0-9._-]{1,64}; deriving the wing instead")
         cfg["palace"]["wing"] = ""
-    xdir = str(cfg["palace"]["exchanges_dir"]).strip()
-    if xdir:
-        expanded = Path(os.path.expanduser(xdir))
+    for key in ("exchanges_dir", "path"):
+        raw = str(cfg["palace"][key]).strip()
+        if not raw:
+            cfg["palace"][key] = ""
+            continue
+        expanded = Path(os.path.expanduser(raw))
         if not expanded.is_absolute():
-            _warn("palace.exchanges_dir must be an absolute path; using the default")
-            cfg["palace"]["exchanges_dir"] = ""
+            _warn(f"palace.{key} must be an absolute path; using the default")
+            cfg["palace"][key] = ""
         else:
-            cfg["palace"]["exchanges_dir"] = str(expanded)
+            cfg["palace"][key] = str(expanded)
     return cfg
 
 
@@ -247,6 +255,39 @@ def exchanges_dir(project_dir: str | os.PathLike | None = None, cfg: dict | None
     if override:
         return Path(os.path.expanduser(override))
     return project_state_dir(project_dir) / "exchanges"
+
+
+def palace_path(project_dir: str | os.PathLike | None = None, cfg: dict | None = None) -> Path:
+    """This project's MemPalace palace directory (the database MemPalace writes).
+
+    palace.path overrides. Otherwise ~/.graph-mempalace/projects/<slug>/palace.
+    One palace per project is what keeps projects apart: MemPalace searches,
+    its knowledge graph and the cross-wing tunnels it digs after every mine all
+    stay inside one palace, so a palace that holds one project cannot reach
+    another. The directory is created by MemPalace on the first mine; nothing
+    here creates it.
+    """
+    cfg = cfg or load_config(project_dir)
+    override = str(cfg["palace"]["path"]).strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    return project_state_dir(project_dir) / "palace"
+
+
+def mempalace_argv(project_dir: str | os.PathLike | None, cfg: dict | None,
+                   *sub: str) -> list[str] | None:
+    """`mempalace --palace <this project's palace> <sub...>`, or None when
+    mempalace is not installed.
+
+    `--palace` is a GLOBAL option of the mempalace CLI and must come before the
+    subcommand; every call the plugin makes goes through here so no call can
+    forget it and land in the shared default palace.
+    """
+    exe = find_tool("mempalace")
+    if exe is None:
+        return None
+    cfg = cfg or load_config(project_dir)
+    return [exe, "--palace", str(palace_path(project_dir, cfg)), *sub]
 
 
 def _hash6(text: str) -> str:
@@ -428,14 +469,22 @@ def find_tool(name: str) -> str | None:
     return found
 
 
-def tool_env(cfg: dict | None = None) -> dict:
-    """Environment for graphify runs: claude-cli backend tuned, no skill auto-refresh."""
-    cfg = cfg or load_config()
+def tool_env(cfg: dict | None = None, project_dir: str | os.PathLike | None = None) -> dict:
+    """Environment for graphify and mempalace runs.
+
+    Graphify: claude-cli backend tuned, no skill auto-refresh. MemPalace: with a
+    project given, MEMPALACE_PALACE_PATH names that project's palace, so any
+    mempalace process that forgets `--palace` (or a child it spawns, such as its
+    hub) still lands in the right palace.
+    """
+    cfg = cfg or load_config(project_dir)
     env = dict(os.environ)
     env.setdefault("GRAPHIFY_NO_AUTO_REFRESH", "1")
     env.setdefault("GRAPHIFY_CLAUDE_CLI_PARALLEL", "1")
     env.setdefault("GRAPHIFY_CLAUDE_CLI_MODEL", str(cfg["graph_b"]["model"]))
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    if project_dir is not None:
+        env["MEMPALACE_PALACE_PATH"] = str(palace_path(project_dir, cfg))
     return env
 
 
