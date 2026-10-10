@@ -1,6 +1,6 @@
 """kb_setup - check, and optionally install, everything the knowledge base needs.
 
-Nine things have to be true before the plugin works. This script says which of
+Ten things have to be true before the plugin works. This script says which of
 them are true on this machine, and `--install` makes the rest true:
 
     uv                   installs and isolates the two tools
@@ -8,10 +8,26 @@ them are true on this machine, and `--install` makes the rest true:
     mempalace            the chat store and its MCP server
     graphify             the graph builder and its MCP server
     graphify extras      pdf, sql and mcp, or whole file types vanish silently
-    mcp servers          mempalace-mcp and graphify-mcp, which .mcp.json spawns
+    mcp servers          mempalace-mcp and graphify-mcp, the two stdio servers
+    mcp launcher python  the interpreter .mcp.json runs scripts/mcp_launch.py with
     mempalace config     ~/.config/mempalace/config.json, written by `mempalace init`
     graphify patch       --strict-mcp-config, worth ~11 s per extraction call
     global git excludes   graphify-out/, so no repo ever commits a graph
+
+GM_PYTHON
+---------
+The MemPalace MCP server is started through `scripts/mcp_launch.py`, and
+`.mcp.json` runs that launcher with `${GM_PYTHON:-python}`. A bare `python` is
+not good enough: on stock macOS there is no `python` at all, only `python3`, and
+on Windows `python3` is usually the Microsoft Store stub, which exits instead of
+running anything. So `--install` pins the variable instead of hoping: it writes
+`env.GM_PYTHON` into `$CLAUDE_CONFIG_DIR/settings.json` (`~/.claude/settings.json`
+by default) with the absolute path of the interpreter running this script, which
+is by definition a Python the plugin already works with. Claude Code expands
+`${GM_PYTHON:-python}` from its own environment and the `env` block of
+settings.json is part of that environment, so the pin reaches the spawned server.
+MCP servers are started when a session starts, so the pin takes effect in the
+NEXT session - every `--install` that writes it says so.
 
 Usage
 -----
@@ -43,6 +59,7 @@ import platform  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -52,15 +69,30 @@ MEMPALACE_CONFIG = HOME / ".config" / "mempalace" / "config.json"
 DEFAULT_GIT_EXCLUDES = HOME / ".config" / "git" / "ignore"
 EXCLUDE_LINE = "graphify-out/"
 
+# The interpreter `.mcp.json` hands scripts/mcp_launch.py, and the variable that
+# pins it. See the GM_PYTHON section of the module docstring.
+GM_PYTHON_ENV = "GM_PYTHON"
+LAUNCHER_CHECK = "mcp launcher python"
+MIN_PYTHON = (3, 11)
+VERSION_PROBE = "import sys;print(sys.version_info[:2])"
+LAUNCHER_FIX = "run --install (writes GM_PYTHON to settings.json)"
+RESTART_LINE = "restart the session so the MCP server picks it up"
+
 GRAPHIFY_SPEC = "graphifyy[pdf,sql,mcp]"  # double y; `graphify` is a different package
 GRAPHIFY_TOOL = "graphifyy"
 
-# The two stdio servers `.mcp.json` spawns, each with the command that brings
+# The two stdio servers behind `.mcp.json`, each with the command that brings
 # it: mempalace-mcp ships with mempalace, graphify-mcp with graphify's mcp extra.
 MCP_SERVERS = (
     ("mempalace-mcp", "uv tool install mempalace"),
     ("graphify-mcp", f'uv tool install "{GRAPHIFY_SPEC}"'),
 )
+
+# Servers whose own name has to be findable on Claude Code's PATH. Only
+# graphify-mcp is: `.mcp.json` spawns it as `${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}`.
+# mempalace-mcp is started by scripts/mcp_launch.py, which resolves the binary
+# itself (GM_MEMPALACE_MCP_BIN, else find_tool), so PATH is not in its way.
+PATH_SENSITIVE_SERVERS = ("graphify-mcp",)
 
 UV_INSTALL_WINDOWS = 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
 UV_INSTALL_POSIX = "curl -LsSf https://astral.sh/uv/install.sh | sh"
@@ -198,11 +230,14 @@ def graphify_pkg_dir(tpy: Path | None) -> Path | None:
 
 
 def mcp_servers_check() -> Check:
-    """Are both stdio servers installed? `.mcp.json` spawns them by name.
+    """Are both stdio servers installed?
 
-    Each arrives with its package, so a missing one means a missing or partial
-    install and the fix is that package's install command. Resolved with
-    `find_tool`, which looks where the servers actually land (a GM_*_BIN
+    `.mcp.json` spawns graphify-mcp by name and mempalace-mcp through
+    scripts/mcp_launch.py, which resolves the binary by absolute path itself,
+    so for mempalace-mcp only the install matters and PATH does not. Either
+    way each server arrives with its package, so a missing one means a missing
+    or partial install and the fix is that package's install command. Resolved
+    with `find_tool`, which looks where the servers actually land (a GM_*_BIN
     override, ~/.local/bin, the uv tool environments) and not only on PATH.
     """
     found: list[str] = []
@@ -227,15 +262,22 @@ def mcp_servers_check() -> Check:
 def mcp_path_advisories() -> list[str]:
     """Servers that are installed but invisible to Claude Code's MCP spawn.
 
-    `.mcp.json` runs `${GM_<NAME>_BIN:-<name>}`, so a bare name has to be on the
-    PATH Claude Code itself was started with - which a GUI-launched editor on
-    macOS does not have. `find_tool` looks in more places than PATH, so when it
-    finds a server that `which` cannot, the server is installed and the spawn
-    will still fail. Never a failure here: the fix is one line in
-    ~/.claude/settings.json, printed verbatim so it can be pasted.
+    `.mcp.json` spawns graphify-mcp as `${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}`,
+    so that bare name has to be on the PATH Claude Code itself was started with
+    - which a GUI-launched editor on macOS does not have. `find_tool` looks in
+    more places than PATH, so when it finds the server that `which` cannot, the
+    server is installed and the spawn will still fail. Never a failure here:
+    the fix is one line in ~/.claude/settings.json, printed verbatim so it can
+    be pasted.
+
+    mempalace-mcp is not checked, because PATH cannot break it: it is started
+    by scripts/mcp_launch.py, which resolves the binary by absolute path
+    (GM_MEMPALACE_MCP_BIN, else find_tool) before spawning it.
     """
     lines: list[str] = []
     for name, _fix in MCP_SERVERS:
+        if name not in PATH_SENSITIVE_SERVERS:
+            continue
         if shutil.which(name):
             continue
         path = find_tool(name)
@@ -246,6 +288,151 @@ def mcp_path_advisories() -> list[str]:
             f"for Claude Code's MCP spawn; add to ~/.claude/settings.json: "
             f'"env": {{"{env_key_for(name)}": "{fwd(path)}"}}')
     return lines
+
+
+# ---------------------------------------------------------------------------
+# the interpreter behind the MemPalace launcher
+# ---------------------------------------------------------------------------
+def settings_path() -> Path:
+    """The settings.json whose `env` block Claude Code expands `${GM_PYTHON}` from."""
+    return gm_common.CLAUDE_CONFIG_DIR / "settings.json"
+
+
+def launcher_interpreter() -> str | None:
+    """What `${GM_PYTHON:-python}` resolves to today, or None when nothing does."""
+    pinned = (os.environ.get(GM_PYTHON_ENV) or "").strip()
+    return pinned or shutil.which("python")
+
+
+def _probe_version(interp: str) -> tuple[tuple[int, int] | None, str]:
+    """Ask one interpreter for `sys.version_info[:2]`. Returns (version, error)."""
+    kwargs: dict = {}
+    if os.name == "nt":  # a console window must never flash up during a check
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        out = subprocess.run([interp, "-c", VERSION_PROBE],
+                             capture_output=True, text=True, timeout=20, **kwargs)
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if out.returncode != 0:
+        tail = (out.stderr or out.stdout or "").strip().splitlines()
+        return None, (tail[-1] if tail else f"exit {out.returncode}")
+    nums = re.findall(r"\d+", out.stdout or "")
+    if len(nums) < 2:
+        return None, "printed no version"
+    return (int(nums[0]), int(nums[1])), ""
+
+
+def launcher_python_check() -> Check:
+    """Can `.mcp.json` start scripts/mcp_launch.py at all?
+
+    `.mcp.json` runs the launcher as `${GM_PYTHON:-python}`, so this check
+    probes exactly that: GM_PYTHON when it is set, otherwise the `python` on
+    PATH. The fallback is the whole reason the variable exists - stock macOS
+    has no `python`, and on Windows the inherited `python3`/`python` can be the
+    Store stub - so a MISSING row here means the MemPalace MCP server will not
+    start until `--install` pins GM_PYTHON.
+    """
+    interp = launcher_interpreter()
+    if not interp:
+        return Check(LAUNCHER_CHECK, False,
+                     f"not found: {GM_PYTHON_ENV} is not set and no `python` is on PATH",
+                     fix=LAUNCHER_FIX)
+    version, error = _probe_version(interp)
+    if version is None:
+        return Check(LAUNCHER_CHECK, False, f"{fwd(interp)} did not run ({error})",
+                     fix=LAUNCHER_FIX)
+    shown = "%d.%d" % version
+    if version < MIN_PYTHON:
+        return Check(LAUNCHER_CHECK, False,
+                     f"{fwd(interp)} is {shown} - too old "
+                     f"(need {MIN_PYTHON[0]}.{MIN_PYTHON[1]})",
+                     fix=LAUNCHER_FIX)
+    return Check(LAUNCHER_CHECK, True, f"{fwd(interp)} is {shown}")
+
+
+def gm_python_snippet() -> str:
+    """The settings.json fragment that pins GM_PYTHON, ready to paste."""
+    return '"env": {"%s": "%s"}' % (GM_PYTHON_ENV, fwd(sys.executable))
+
+
+def _write_json_newline(path: Path, obj) -> None:
+    """Write `obj` as JSON (indent 2, trailing newline) through a temp file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(obj, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def ensure_gm_python_setting(sink=None) -> str:
+    """Pin GM_PYTHON in settings.json to the interpreter running this script.
+
+    Reads and rewrites `$CLAUDE_CONFIG_DIR/settings.json` (`~/.claude/settings.json`
+    by default), keeping every other key, and returns what it did:
+
+        "env"         GM_PYTHON is already in the environment; nothing to write
+        "present"     settings.json already pins it; another value is the user's
+        "written"     env.GM_PYTHON now names this interpreter
+        "unparsable"  the file is not a JSON object, so it was left untouched
+        "unreadable"  the file is there and could not be read
+        "failed"      the write itself failed
+
+    Someone else's settings file is not ours to lose, so anything other than a
+    JSON object is left exactly as it is and the one line to paste is printed
+    instead. A write never takes effect in the running session: MCP servers are
+    started at session start, so the line says to restart.
+    """
+    sink = sink or sys.stdout
+    if (os.environ.get(GM_PYTHON_ENV) or "").strip():
+        return "env"
+
+    path = settings_path()
+    data: dict = {}
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        raw = None
+    except OSError as exc:
+        print(f"\n-> {path} exists and could not be read ({exc}); "
+              f"it was not changed. Add this yourself: {gm_python_snippet()}", file=sink)
+        return "unreadable"
+    if raw is not None and raw.strip():
+        try:
+            loaded = json.loads(raw)
+        except ValueError:
+            loaded = None
+        if not isinstance(loaded, dict):
+            print(f"\n-> {path} is not a JSON object, so it was left alone. "
+                  f"Add this to it yourself: {gm_python_snippet()}", file=sink)
+            return "unparsable"
+        data = loaded
+
+    env = data.get("env")
+    if not isinstance(env, dict):
+        env = {}
+    if str(env.get(GM_PYTHON_ENV) or "").strip():
+        return "present"
+
+    env[GM_PYTHON_ENV] = fwd(sys.executable)
+    data["env"] = env
+    try:
+        _write_json_newline(path, data)
+    except Exception as exc:
+        print(f"\n-> could not write {path} ({exc}); add this yourself: "
+              f"{gm_python_snippet()}", file=sink)
+        return "failed"
+    print(f"\n-> wrote {GM_PYTHON_ENV}={fwd(sys.executable)} to {path} - {RESTART_LINE}",
+          file=sink)
+    return "written"
 
 
 def collect(project_dir: str) -> Report:
@@ -293,11 +480,20 @@ def collect(project_dir: str) -> Report:
         fix=f'uv tool install --force "{GRAPHIFY_SPEC}" then re-run the patch step'))
 
     rep.checks.append(mcp_servers_check())
+    rep.checks.append(launcher_python_check())
     rep.advisories.extend(mcp_path_advisories())
+
+    # Which palace this project uses, so the one question that matters after the
+    # one-palace-per-project change - "where did my memory go?" - has an answer
+    # in the table. Never a failure: MemPalace creates the directory on the
+    # first mine, so it is absent on a project nothing has ingested yet.
+    cfg = gm_common.load_config(project_dir)
+    palace = gm_common.palace_path(project_dir, cfg)
+    rep.advisories.append(f"palace: {palace}")
 
     rep.checks.append(Check(
         "mempalace config", MEMPALACE_CONFIG.exists(), str(MEMPALACE_CONFIG),
-        fix=f"mempalace init {project_dir} --yes --no-llm"))
+        fix=f'mempalace --palace "{palace}" init {project_dir} --yes --no-llm'))
 
     pkg = graphify_pkg_dir(tpy)
     llm = (pkg / "llm.py") if pkg else None
@@ -389,11 +585,30 @@ def do_install(rep: Report, project_dir: str, to_stderr: bool) -> None:
                "reinstall graphify with the pdf, sql and mcp extras")
         installed_graphify = True
 
+    # The interpreter pin is independent of the two tools, but it is only worth
+    # writing once they are there: it exists so .mcp.json can start the MemPalace
+    # launcher, and the launcher has nothing to start until mempalace-mcp exists.
+    ensure_gm_python_setting(sink)
+
     if rep.missing("mempalace config"):
-        mempalace = find_tool("mempalace")
-        if mempalace:
-            stream([mempalace, "init", project_dir, "--yes", "--no-llm"], to_stderr,
-                   "write the MemPalace config")
+        # `mempalace init` is KEPT, and pointed at this project's palace.
+        #
+        # `mempalace mine` does create a palace, so init is not what brings the
+        # directory into existence any more. It is kept for the other two things
+        # it alone does: it writes ~/.config/mempalace/config.json, which is the
+        # `mempalace config` check and nothing else writes, and it registers this
+        # project's entities so the miner can compute tunnels at mine time.
+        # It goes through `mempalace_argv`, so it runs against THIS project's
+        # palace: verified in mempalace 3.10.0, `cmd_init` honours the global
+        # `--palace` flag by exporting MEMPALACE_PALACE_PATH before it reads the
+        # config, and it does not write palace_path into config.json - so one
+        # project's init cannot redirect another project's default palace.
+        cfg = gm_common.load_config(project_dir)
+        argv = gm_common.mempalace_argv(project_dir, cfg,
+                                        "init", project_dir, "--yes", "--no-llm")
+        if argv:
+            stream(argv, to_stderr,
+                   "write the MemPalace config and detect this project's entities")
         else:
             print("  mempalace still not found; skipping its init", file=sink)
 

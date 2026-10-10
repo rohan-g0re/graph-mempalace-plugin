@@ -9,7 +9,7 @@ are `gm.find_tool`, which may run `uv tool dir` once on a machine whose
 `~/.graph-mempalace/tools.json` is still empty, and the one detached compound
 on a project seen for the first time.
 
-Three things can be printed:
+Four things can be printed:
 
   * the prerequisites line, when `mempalace` or `graphify` cannot be found.
     Nothing else is worth saying until they are installed.
@@ -18,9 +18,23 @@ Three things can be printed:
     same here as it is in the hooks.
   * one status line: exchanges on disk, Graph B's node count, and when the last
     compound finished.
+  * one line when a background pass was just started: either first sight or the
+    palace seed, never both.
 
 First sight of a project gets a detached compound of its whole history, because
 a knowledge base nobody had to set up is the entire point of the plugin.
+
+The palace seed is the same idea one release later. Up to 0.1.0 every project on
+a machine mined into one shared MemPalace palace; from 0.2.0 each project gets
+its own, because MemPalace digs tunnels across wings after every mine and its
+search and knowledge graph are palace-wide, so a shared palace leaks one project
+into another. An upgraded machine is therefore in a state first sight cannot see:
+the exchanges are on disk and ingested, so first sight stays quiet, but this
+project has no palace of its own and every query against it comes back empty.
+One mine-only compound moves them. Mine-only, because the exchanges and both
+graphs are already current - the palace is the only thing missing - and because
+a full chain would spend an hour of LLM calls rebuilding Graph B for nothing.
+It runs at most once per project: a marker file records the spawn.
 
 Exits 0 always. A hook that fails must never block a session.
 """
@@ -50,6 +64,13 @@ PREREQ_LINE = ("graph-mempalace: prerequisites missing (mempalace, graphify). "
 FIRST_SIGHT_LINE = ("graph-mempalace: first session here - ingesting this project's "
                     "history in the background (a few minutes to an hour; check "
                     "~/.graph-mempalace/compound.log)")
+
+PALACE_SEED_LINE = ("graph-mempalace: moving this project's memory into its own "
+                    "palace in the background (one-time, a few minutes)")
+
+# One file per project, written the moment the seed is spawned, so an upgrade
+# costs one mine and not one per session start.
+SEED_MARKER = "palace_seed.json"
 
 INSTRUCTIONS = """graph-mempalace: this project has a knowledge base of its past conversations and code.
 Before answering about past work or decisions, run:
@@ -219,11 +240,61 @@ def maybe_first_sight(project: str, cfg: dict, session_id: str) -> str | None:
         "--transcripts", str(transcripts),
         "--session", session_id or "-",
     ]
-    pid = gm.spawn_detached(argv, cwd=project, env=gm.tool_env(cfg))
+    pid = gm.spawn_detached(argv, cwd=project, env=gm.tool_env(cfg, project))
     if pid is None:
         return None
     gm.append_log(f"first sight: spawned a compound for {gm.project_token(project)} pid={pid}")
     return FIRST_SIGHT_LINE
+
+
+def maybe_palace_seed(project: str, cfg: dict, session_id: str) -> str | None:
+    """Mine an already-ingested project into its own palace, once.
+
+    This is the 0.1.0 -> 0.2.0 upgrade path and nothing else. Four conditions,
+    all of them necessary:
+
+      * exchanges exist, so there is something to mine and first sight is not
+        the right answer. (main() only calls this when first sight did not
+        fire, so the two can never both spawn.)
+      * this project's palace directory does not exist. MemPalace creates it on
+        the first mine, so its absence means no mine has ever run against it -
+        on an upgraded machine the drawers are in the old shared palace.
+      * no marker. The marker is written on the spawn, not on success, because
+        a mine that fails for a reason that will keep failing must not re-spawn
+        on every session start for ever. `/graph-mempalace:kb-compound` is the
+        retry, and deleting the marker re-arms this.
+      * no lock, so this never runs beside another compound.
+
+    Returns the line to print, or None. Writes the marker and one log line.
+    """
+    exchanges = gm.exchanges_dir(project, cfg)
+    if not count_exchanges(exchanges):
+        return None
+    palace = gm.palace_path(project, cfg)
+    if palace.exists():
+        return None
+    marker = gm.project_state_dir(project) / SEED_MARKER
+    if marker.exists():
+        return None
+    if gm.lock_held(float(cfg["compound"]["lock_stale_hours"])):
+        return None
+    transcripts = gm.transcripts_dir(project)
+    argv = [
+        gm.python_exe(),
+        str(gm.SCRIPTS_DIR / "compound_run.py"),
+        "--project", project,
+        "--transcripts", str(transcripts),
+        "--session", session_id or "-",
+        "--only", "mine",
+    ]
+    pid = gm.spawn_detached(argv, cwd=project, env=gm.tool_env(cfg, project))
+    if pid is None:
+        return None
+    gm.write_json_atomic(marker, {"spawned": gm.now_stamp(), "pid": pid,
+                                  "palace": str(palace)})
+    gm.append_log(f"palace seed: spawned a mine for {gm.project_token(project)} "
+                  f"into {palace} pid={pid}")
+    return PALACE_SEED_LINE
 
 
 def main() -> int:
@@ -243,9 +314,15 @@ def main() -> int:
         parts.append(INSTRUCTIONS.format(s=scripts_path()))
     if cfg["session"]["show_status"]:
         parts.append(status_line(project, cfg))
+    # At most one spawn per session start: first sight already mines, so the
+    # seed is only asked about when first sight decided there was nothing to do.
     first = maybe_first_sight(project, cfg, session_id)
     if first:
         parts.append(first)
+    else:
+        seed = maybe_palace_seed(project, cfg, session_id)
+        if seed:
+            parts.append(seed)
 
     out = "\n".join(p for p in parts if p).strip()
     if len(out) > STDOUT_BUDGET:

@@ -41,8 +41,26 @@ def ss(gm_home, project, monkeypatch, empty_path):
         monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
         return mod.main()
 
+    def make_exchanges(count=1, index=False):
+        """`count` exchange files (and optionally the filter's index) on disk."""
+        exchanges = mod.gm.exchanges_dir(project)
+        exchanges.mkdir(parents=True, exist_ok=True)
+        for n in range(count):
+            (exchanges / f"2026-03-04-b49fc7be-{n:04d}.md").write_text(
+                "x", encoding="utf-8")
+        if index:
+            (exchanges / mod.INDEX_NAME).write_text("", encoding="utf-8")
+        return exchanges
+
+    def make_palace():
+        """The palace directory MemPalace creates on its first mine."""
+        palace = mod.gm.palace_path(project)
+        palace.mkdir(parents=True, exist_ok=True)
+        return palace
+
     return SimpleNamespace(mod=mod, gm=mod.gm, spawns=spawns, project=project,
-                           install_tools=install_tools, run=run)
+                           install_tools=install_tools, run=run,
+                           make_exchanges=make_exchanges, make_palace=make_palace)
 
 
 def test_missing_prerequisites_print_one_line_and_nothing_else(ss, capsys):
@@ -85,9 +103,8 @@ def test_the_status_line_counts_the_exchanges_on_disk(ss, capsys):
 
 
 def test_the_status_line_adds_graph_b_nodes_and_the_last_compound(ss, capsys):
-    exchanges = ss.gm.exchanges_dir(ss.project)
-    exchanges.mkdir(parents=True)
-    (exchanges / "2026-03-04-b49fc7be-0001.md").write_text("x", encoding="utf-8")
+    ss.make_exchanges(1)
+    ss.make_palace()            # an ingested project: no palace seed to print
     graph = ss.gm.graph_b_path(ss.project)
     graph.parent.mkdir(parents=True)
     graph.write_text(json.dumps({"nodes": [{"id": 1}, {"id": 2}, {"id": 3}]}),
@@ -148,9 +165,8 @@ def test_first_sight_is_skipped_while_a_compound_holds_the_lock(ss, capsys):
 
 def test_first_sight_is_skipped_once_an_exchange_file_exists(ss, capsys):
     ss.gm.transcripts_dir(ss.project).mkdir(parents=True)
-    exchanges = ss.gm.exchanges_dir(ss.project)
-    exchanges.mkdir(parents=True)
-    (exchanges / "2026-03-04-b49fc7be-0001.md").write_text("x", encoding="utf-8")
+    ss.make_exchanges(1)
+    ss.make_palace()            # and the palace is there, so no seed either
     ss.install_tools()
     ss.run()
     assert ss.spawns == []
@@ -358,3 +374,130 @@ def test_a_compound_that_could_not_start_points_at_kb_setup(ss, capsys):
 ])
 def test_failure_note_picks_the_fix_that_matches(ss, status, expected):
     assert ss.mod.failure_note(status) == expected
+
+
+# ------------------------- the palace seed: 0.1.0 -> 0.2.0, one mine, one time
+
+def marker_path(ss):
+    return ss.gm.project_state_dir(ss.project) / ss.mod.SEED_MARKER
+
+
+def test_the_palace_seed_mines_an_ingested_project_into_its_own_palace(
+        ss, capsys, samefile):
+    """Exchanges on disk, no palace: the upgrade case first sight cannot see."""
+    ss.make_exchanges(3, index=True)
+    ss.install_tools()
+    ss.run()
+
+    out = capsys.readouterr().out
+    assert ss.mod.PALACE_SEED_LINE in out
+    assert "first session here" not in out
+
+    assert len(ss.spawns) == 1
+    spawn = ss.spawns[0]
+    argv = spawn.argv
+    assert argv[0] == ss.gm.python_exe()
+    assert argv[1].endswith("compound_run.py")
+    assert argv[2] == "--project" and samefile(argv[3], ss.project)
+    assert argv[4] == "--transcripts"
+    assert samefile(argv[5], ss.gm.transcripts_dir(ss.project))
+    assert argv[6:] == ["--session", "sess-1", "--only", "mine"]
+    assert samefile(spawn.cwd, ss.project)
+
+    # Even a mempalace child that forgets --palace lands in the right palace.
+    palace = ss.gm.palace_path(ss.project)
+    assert spawn.env["MEMPALACE_PALACE_PATH"] == str(palace)
+
+    marker = json.loads(marker_path(ss).read_text(encoding="utf-8"))
+    assert marker["pid"] == 4242
+    assert marker["palace"] == str(palace)
+    assert marker["spawned"]
+    assert "palace seed: spawned a mine" in ss.gm.LOG_PATH.read_text(encoding="utf-8")
+
+
+def test_the_palace_seed_runs_only_once(ss, capsys):
+    ss.make_exchanges(2, index=True)
+    ss.install_tools()
+    for _ in range(3):
+        ss.run()
+    assert len(ss.spawns) == 1
+    assert capsys.readouterr().out.count(ss.mod.PALACE_SEED_LINE) == 1
+
+
+def test_no_palace_seed_once_the_palace_exists(ss, capsys):
+    ss.make_exchanges(2, index=True)
+    ss.make_palace()
+    ss.install_tools()
+    ss.run()
+    assert ss.spawns == []
+    assert ss.mod.PALACE_SEED_LINE not in capsys.readouterr().out
+    assert not marker_path(ss).exists()
+
+
+def test_no_palace_seed_when_the_marker_is_already_there(ss, capsys):
+    ss.make_exchanges(2, index=True)
+    ss.gm.write_json_atomic(marker_path(ss), {"spawned": "2026-10-10T00:00:00",
+                                              "pid": 1, "palace": "x"})
+    ss.install_tools()
+    ss.run()
+    assert ss.spawns == []
+    assert ss.mod.PALACE_SEED_LINE not in capsys.readouterr().out
+
+
+def test_no_palace_seed_while_a_compound_holds_the_lock(ss, capsys):
+    ss.make_exchanges(2, index=True)
+    assert ss.gm.lock_acquire() is True
+    ss.install_tools()
+    ss.run()
+    assert ss.spawns == []
+    assert ss.mod.PALACE_SEED_LINE not in capsys.readouterr().out
+    assert not marker_path(ss).exists()
+
+
+def test_no_palace_seed_when_first_sight_fires(ss, capsys):
+    """Nothing ingested yet: first sight mines, so the seed must stay out of it."""
+    ss.gm.transcripts_dir(ss.project).mkdir(parents=True)
+    ss.install_tools()
+    ss.run()
+    out = capsys.readouterr().out
+    assert "first session here" in out
+    assert ss.mod.PALACE_SEED_LINE not in out
+    assert len(ss.spawns) == 1
+    assert "--only" not in ss.spawns[0].argv
+    assert not marker_path(ss).exists()
+
+
+def test_no_palace_seed_without_exchanges(ss, capsys):
+    """An empty exchanges directory is first sight's business, not the seed's."""
+    ss.gm.exchanges_dir(ss.project).mkdir(parents=True)
+    ss.install_tools()
+    ss.run()
+    assert ss.spawns == []           # no transcripts either, so first sight is out
+    assert ss.mod.PALACE_SEED_LINE not in capsys.readouterr().out
+    assert not marker_path(ss).exists()
+
+
+def test_a_failed_seed_spawn_writes_no_marker(ss, capsys, monkeypatch):
+    ss.make_exchanges(2, index=True)
+    monkeypatch.setattr(ss.gm, "spawn_detached", lambda *a, **k: None)
+    ss.install_tools()
+    ss.run()
+    assert ss.mod.PALACE_SEED_LINE not in capsys.readouterr().out
+    assert not marker_path(ss).exists()
+
+
+def test_the_seed_follows_a_pinned_palace_path(ss, capsys, write_config, tmp_path):
+    elsewhere = tmp_path / "pinned-palace"
+    write_config('[palace]\npath = "%s"\n' % str(elsewhere).replace("\\", "/"))
+    ss.make_exchanges(1, index=True)
+    ss.install_tools()
+    ss.run()
+    assert len(ss.spawns) == 1
+    assert ss.spawns[0].env["MEMPALACE_PALACE_PATH"] == str(elsewhere)
+    marker = json.loads(marker_path(ss).read_text(encoding="utf-8"))
+    assert marker["palace"] == str(elsewhere)
+
+    elsewhere.mkdir()                        # now it exists: no second seed
+    marker_path(ss).unlink()
+    ss.run()
+    assert len(ss.spawns) == 1

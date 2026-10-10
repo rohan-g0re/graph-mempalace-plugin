@@ -22,6 +22,7 @@ EXPECTED_CHECKS = [
     "graphify",
     "graphify extras (pdf, sql, mcp)",
     "mcp servers",
+    "mcp launcher python",
     "mempalace config",
     "graphify patch (--strict-mcp-config)",
     "global git excludes (graphify-out/)",
@@ -123,16 +124,21 @@ def test_check_never_reaches_the_installer(kbs, monkeypatch, capsys):
 
 def test_the_arm_advisory_matches_the_machine(kbs, capsys):
     _, rep = json_report(kbs, capsys)
+    # The palace note is always there; the ARM note only on an ARM machine.
+    others = [a for a in rep["advisories"] if not a.startswith("palace: ")]
     if platform.machine().upper() in ("ARM64", "AARCH64"):
-        assert len(rep["advisories"]) == 1
-        assert "ARM" in rep["advisories"][0]
+        assert len(others) == 1
+        assert "ARM" in others[0]
     else:
-        assert rep["advisories"] == []
+        assert others == []
 
 
 # ------------------------------------------------------------ everything green
 
 def test_every_check_can_pass(kbs, capsys, monkeypatch, tmp_path, make_tool):
+    # The launcher check probes ${GM_PYTHON:-python}; PATH is empty here, so the
+    # pin is what makes it resolvable - which is the pin --install writes.
+    monkeypatch.setenv("GM_PYTHON", sys.executable)
     kbs.install("uv")
     kbs.install("mempalace")
     kbs.install("graphify")
@@ -201,22 +207,26 @@ def test_both_servers_installed_passes_with_both_paths(kbs, capsys):
 
 # ---------------------------------------------------- the mcp on PATH advisory
 
-def test_a_server_that_is_installed_but_off_path_is_an_advisory_not_a_failure(
-        kbs, capsys):
-    """find_tool finds it, `which` does not: installed, but the spawn still fails."""
-    mem = kbs.install("mempalace-mcp")
+def test_only_graphify_mcp_gets_a_path_advisory(kbs, capsys):
+    """find_tool finds it, `which` does not: installed, but the spawn still fails.
+
+    Only for graphify-mcp. mempalace-mcp is spawned by scripts/mcp_launch.py,
+    which resolves the binary by absolute path itself, so PATH cannot break it.
+    """
+    kbs.install("mempalace-mcp")
     gra = kbs.install("graphify-mcp")
     _, rep = json_report(kbs, capsys)
     assert next(c for c in rep["checks"] if c["check"] == "mcp servers")["ok"] is True
     lines = [a for a in rep["advisories"] if a.startswith("mcp on PATH")]
-    assert len(lines) == 2
-    for name, path in (("mempalace-mcp", mem), ("graphify-mcp", gra)):
-        line = next(a for a in lines if name in a)
-        key = kbs.mod.env_key_for(name)
-        assert "%s is installed at %s" % (name, kbs.mod.fwd(path)) in line
-        assert "not on PATH for Claude Code's MCP spawn" in line
-        assert '"env": {"%s": "%s"}' % (key, kbs.mod.fwd(path)) in line
-        assert "\\" not in line                  # forward slashes, Windows too
+    assert len(lines) == 1
+    line = lines[0]
+    assert "mempalace-mcp" not in line
+    key = kbs.mod.env_key_for("graphify-mcp")
+    assert key == "GM_GRAPHIFY_MCP_BIN"
+    assert "graphify-mcp is installed at %s" % kbs.mod.fwd(gra) in line
+    assert "not on PATH for Claude Code's MCP spawn" in line
+    assert '"env": {"%s": "%s"}' % (key, kbs.mod.fwd(gra)) in line
+    assert "\\" not in line                      # forward slashes, Windows too
 
 
 def test_a_server_on_path_needs_no_advisory(kbs, capsys, monkeypatch):
@@ -230,8 +240,8 @@ def test_a_server_on_path_needs_no_advisory(kbs, capsys, monkeypatch):
 def test_a_server_that_is_absent_gets_no_advisory_only_the_failing_row(kbs, capsys):
     _, rep = json_report(kbs, capsys)
     assert [a for a in rep["advisories"] if "mcp on PATH" in a] == []
-    assert rep["checks"][5]["check"] == "mcp servers"
-    assert rep["checks"][5]["ok"] is False
+    row = next(c for c in rep["checks"] if c["check"] == "mcp servers")
+    assert row["ok"] is False
 
 
 @pytest.mark.parametrize("tool,key", [
@@ -307,3 +317,173 @@ def test_excludes_has_rule_is_false_for_a_missing_file(kbs, tmp_path):
 
 def test_graphify_pkg_dir_is_none_without_an_interpreter(kbs):
     assert kbs.mod.graphify_pkg_dir(None) is None
+
+
+# ------------------------------------------------- the MCP launcher's Python
+
+def launcher_row(kbs, capsys):
+    _, rep = json_report(kbs, capsys)
+    return next(c for c in rep["checks"] if c["check"] == kbs.mod.LAUNCHER_CHECK)
+
+
+def test_a_pinned_interpreter_new_enough_passes(kbs, capsys, monkeypatch, make_tool):
+    """GM_PYTHON names it and it reports 3.12: .mcp.json can start the launcher."""
+    fake = make_tool(kbs.bins, "fakepython", stdout="(3, 12)\n")
+    monkeypatch.setenv("GM_PYTHON", str(fake))
+    row = launcher_row(kbs, capsys)
+    assert row["ok"] is True
+    assert kbs.mod.fwd(fake) in row["detail"]
+    assert "3.12" in row["detail"]
+    assert row["fix"] == ""
+
+
+def test_an_interpreter_that_is_too_old_fails_with_the_install_fix(
+        kbs, capsys, monkeypatch, make_tool):
+    fake = make_tool(kbs.bins, "oldpython", stdout="(3, 9)\n")
+    monkeypatch.setenv("GM_PYTHON", str(fake))
+    row = launcher_row(kbs, capsys)
+    assert row["ok"] is False
+    assert "3.9" in row["detail"] and "too old" in row["detail"]
+    assert row["fix"] == kbs.mod.LAUNCHER_FIX
+    assert "GM_PYTHON" in row["fix"]
+
+
+def test_nothing_resolvable_fails(kbs, capsys):
+    """Empty PATH and no GM_PYTHON: `${GM_PYTHON:-python}` resolves to nothing."""
+    assert kbs.mod.launcher_interpreter() is None
+    row = launcher_row(kbs, capsys)
+    assert row["ok"] is False
+    assert "not found" in row["detail"]
+    assert "GM_PYTHON" in row["detail"]
+    assert row["fix"] == kbs.mod.LAUNCHER_FIX
+
+
+def test_an_interpreter_that_cannot_run_fails(kbs, capsys, monkeypatch, tmp_path):
+    missing = tmp_path / "no-such-python"
+    monkeypatch.setenv("GM_PYTHON", str(missing))
+    row = launcher_row(kbs, capsys)
+    assert row["ok"] is False
+    assert "did not run" in row["detail"]
+
+
+# ------------------------------------------------- pinning GM_PYTHON for 0.2.0
+
+def settings_file(kbs):
+    return kbs.mod.settings_path()
+
+
+def test_the_settings_file_is_under_the_claude_config_dir(kbs, gm_home):
+    assert settings_file(kbs) == gm_home / ".claude" / "settings.json"
+
+
+def test_gm_python_is_written_and_every_other_key_survives(kbs, capsys):
+    path = settings_file(kbs)
+    path.write_text(json.dumps({"model": "opus",
+                                "permissions": {"allow": ["Bash(ls:*)"]},
+                                "env": {"OTHER": "keep me"}}, indent=2),
+                    encoding="utf-8")
+    assert kbs.mod.ensure_gm_python_setting() == "written"
+
+    text = path.read_text(encoding="utf-8")
+    assert text.endswith("\n")
+    data = json.loads(text)
+    assert data["env"]["GM_PYTHON"] == kbs.mod.fwd(sys.executable)
+    assert data["env"]["OTHER"] == "keep me"
+    assert data["model"] == "opus"
+    assert data["permissions"] == {"allow": ["Bash(ls:*)"]}
+    out = capsys.readouterr().out
+    assert "GM_PYTHON" in out
+    assert kbs.mod.RESTART_LINE in out
+
+
+def test_gm_python_is_written_when_there_is_no_settings_file_yet(kbs, capsys):
+    path = settings_file(kbs)
+    assert not path.exists()
+    assert kbs.mod.ensure_gm_python_setting() == "written"
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "env": {"GM_PYTHON": kbs.mod.fwd(sys.executable)}}
+
+
+def test_an_env_block_that_is_not_an_object_is_replaced_not_crashed_on(kbs, capsys):
+    path = settings_file(kbs)
+    path.write_text(json.dumps({"env": "nonsense", "model": "opus"}), encoding="utf-8")
+    assert kbs.mod.ensure_gm_python_setting() == "written"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["env"] == {"GM_PYTHON": kbs.mod.fwd(sys.executable)}
+    assert data["model"] == "opus"
+
+
+def test_an_existing_pin_is_left_exactly_as_it_is(kbs, capsys):
+    path = settings_file(kbs)
+    before = json.dumps({"env": {"GM_PYTHON": "D:/py311/python.exe"}}, indent=2)
+    path.write_text(before, encoding="utf-8")
+    assert kbs.mod.ensure_gm_python_setting() == "present"
+    assert path.read_text(encoding="utf-8") == before
+    assert capsys.readouterr().out == ""
+
+
+def test_nothing_is_written_when_gm_python_is_already_in_the_environment(
+        kbs, capsys, monkeypatch):
+    monkeypatch.setenv("GM_PYTHON", sys.executable)
+    assert kbs.mod.ensure_gm_python_setting() == "env"
+    assert not settings_file(kbs).exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_an_unparsable_settings_file_is_not_touched_and_the_snippet_is_printed(
+        kbs, capsys):
+    path = settings_file(kbs)
+    broken = '{"model": "opus",\n'          # a hand-edit that lost a brace
+    path.write_text(broken, encoding="utf-8")
+    assert kbs.mod.ensure_gm_python_setting() == "unparsable"
+    assert path.read_text(encoding="utf-8") == broken
+    out = capsys.readouterr().out
+    assert kbs.mod.gm_python_snippet() in out
+    assert '"GM_PYTHON": "%s"' % kbs.mod.fwd(sys.executable) in out
+    assert "\\" not in kbs.mod.gm_python_snippet()
+
+
+def test_a_settings_file_that_is_a_json_list_is_not_touched(kbs, capsys):
+    path = settings_file(kbs)
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    assert kbs.mod.ensure_gm_python_setting() == "unparsable"
+    assert path.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+# ----------------------------------------------------- one palace per project
+
+def test_the_palace_note_names_this_projects_palace(kbs, capsys):
+    _, rep = json_report(kbs, capsys)
+    expected = kbs.gm.palace_path(str(kbs.project))
+    note = next(a for a in rep["advisories"] if a.startswith("palace: "))
+    assert note == "palace: %s" % expected
+    assert str(kbs.gm.project_state_dir(str(kbs.project))) in note
+
+
+def test_the_palace_note_follows_the_config_override(kbs, capsys, write_config,
+                                                     tmp_path):
+    elsewhere = tmp_path / "pinned-palace"
+    write_config('[palace]\npath = "%s"\n' % str(elsewhere).replace("\\", "/"))
+    _, rep = json_report(kbs, capsys)
+    note = next(a for a in rep["advisories"] if a.startswith("palace: "))
+    assert note == "palace: %s" % elsewhere
+
+
+def test_the_palace_note_prints_as_a_note_and_never_fails_the_run(kbs, capsys,
+                                                                  monkeypatch):
+    monkeypatch.setattr(kbs.mod, "collect",
+                        lambda project_dir: kbs.mod.Report(
+                            checks=[kbs.mod.Check("uv", True, "/bin/uv")],
+                            advisories=["palace: /tmp/palace"]))
+    assert kbs.report(("--check",)) == 0
+    out = capsys.readouterr().out
+    assert "[NOTE   ] palace: /tmp/palace" in out
+    assert "verdict: ready" in out
+
+
+def test_the_mempalace_config_fix_names_the_project_palace(kbs, capsys):
+    _, rep = json_report(kbs, capsys)
+    row = next(c for c in rep["checks"] if c["check"] == "mempalace config")
+    assert row["ok"] is False
+    assert "--palace" in row["fix"]
+    assert str(kbs.gm.palace_path(str(kbs.project))) in row["fix"]
