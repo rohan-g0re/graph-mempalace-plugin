@@ -9,6 +9,22 @@ that an update exists, so a release bumps it and adds an entry here in one commi
 
 ## [Unreleased]
 
+### Added
+
+- `kb_resolve.py doctor` reports `no stale drawers`: drawers whose source file
+  is gitignored or gone, counted with `mempalace sync --dry-run --wing <wing>`,
+  with the exact `--apply` line as the fix. Skipped when the installed
+  MemPalace prints no sync report.
+
+### Fixed
+
+- CI runs `claude plugin validate . --strict` without `--json`; the flag is
+  not on every CLI version.
+- The SessionStart status line reports only this project's last compound; the
+  log is shared by every project on the machine.
+- `py.sh` caches the interpreter's absolute path, so a hook with an empty or
+  Windows-format PATH does not fall through to `uv`.
+
 ## [0.1.0] - 2026-10-10
 
 First release. Everything below is new.

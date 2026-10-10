@@ -294,7 +294,37 @@ def doctor_checks(cwd: str) -> tuple[list[dict], dict]:
     wing = wing_for(cwd, cfg, record=False)
     chk("dialogue wing present", wing in wings, wing)
 
+    # Drawers whose source file is gitignored or gone are junk in every search
+    # result; `sync --dry-run` counts them without changing anything. The check
+    # is skipped (not failed) when the installed MemPalace has no sync report.
+    if mempalace and wing in wings:
+        stale = stale_drawers(run([mempalace, "sync", "--dry-run", "--wing", wing]))
+        if stale is not None:
+            gitignored, missing = stale
+            total = gitignored + missing
+            detail = f"{gitignored} gitignored, {missing} missing"
+            if total:
+                detail += f" - fix: mempalace sync --apply --wing {wing}"
+            chk("no stale drawers", total == 0, detail)
+
     return checks, {"linked": linked, "exchanges": len(idx), "dialogue_dir": dd}
+
+
+STALE_GITIGNORED = re.compile(r"^\s*Gitignored:\s+(\d+)", re.MULTILINE)
+STALE_MISSING = re.compile(r"^\s*Missing:\s+(\d+)", re.MULTILINE)
+
+
+def stale_drawers(sync_output: str) -> tuple[int, int] | None:
+    """(gitignored, missing) drawer counts from a `mempalace sync` report.
+
+    None when the output carries neither figure, which means the installed
+    MemPalace did not produce a sync report, not that the palace is clean.
+    """
+    g = STALE_GITIGNORED.search(sync_output)
+    m = STALE_MISSING.search(sync_output)
+    if g is None and m is None:
+        return None
+    return (int(g.group(1)) if g else 0, int(m.group(1)) if m else 0)
 
 
 def cmd_doctor(cwd: str, as_json: bool = False) -> int:

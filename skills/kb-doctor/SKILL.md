@@ -27,6 +27,9 @@ disable-model-invocation: true
    A `[NOTE]` line is an advisory and never a FAIL: `mcp on PATH` means a
    server is installed but not visible to Claude Code's MCP spawn, and its
    fix is to paste the printed `"env"` line into `~/.claude/settings.json`.
+   `no stale drawers` failing means the palace holds drawers whose source
+   file is gitignored or gone; the printed `mempalace sync --apply --wing`
+   line deletes only those and leaves every other drawer alone.
 
 4. When both commands come back clean, say so in one line and give the Graph A
    and Graph B node counts the doctor printed.

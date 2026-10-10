@@ -49,6 +49,22 @@ Graph B was built before the per-exchange filter existed, so its nodes point at
 whole-session files rather than exchange ids. Rebuild it with
 `/graph-mempalace:kb-compound`.
 
+## Search returns drawers whose source is `_index.jsonl`
+
+An older filter wrote the exchange index without listing it in the dialogue
+directory's `.gitignore`, so `mempalace mine` filed every index row as a drawer.
+The current filter adds the line, and `kb-doctor` reports the leftovers as
+`no stale drawers` with the fix on the same line:
+
+```bash
+mempalace sync --dry-run --wing <wing>    # counts drawers whose source is gitignored or gone
+mempalace sync --apply --wing <wing>      # deletes exactly those
+```
+
+`--apply` requires `--wing` (MemPalace refuses a palace-wide delete), and it
+touches nothing else — MemPalace stores one drawer per piece of content, so a
+later re-mine of the same exchanges files nothing twice. Verified 2026-10-10.
+
 ## Hooks fire twice
 
 Claude Code gives hooks no namespace, so a hook listed in both the user's

@@ -198,6 +198,57 @@ def test_doctor_fails_when_the_wing_is_not_in_the_palace(kb, capsys):
     assert "[OK ] palace reachable" in out
 
 
+SYNC_BODY = (
+    "if 'sync' in sys.argv:\n"
+    "    assert '--dry-run' in sys.argv, 'doctor must never apply a prune'\n"
+    "    sys.stdout.write('  Kept:           4457\\n'\n"
+    "                     '  Gitignored:     %d  (would remove)\\n'\n"
+    "                     '  Missing:        %d  (would remove)\\n')\n"
+)
+
+
+def test_doctor_flags_stale_drawers_and_names_the_fix(kb, capsys):
+    kb.install("mempalace", stdout=f"PALACE\nWING:  {kb.wing}\n", body=SYNC_BODY % (261, 3))
+    kb.install("graphify")
+    assert kb.mod.cmd_doctor(str(kb.project)) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] no stale drawers - 261 gitignored, 3 missing" in out
+    assert f"fix: mempalace sync --apply --wing {kb.wing}" in out
+
+
+def test_doctor_passes_the_stale_check_on_a_clean_wing(kb, capsys):
+    kb.install("mempalace", stdout=f"PALACE\nWING:  {kb.wing}\n", body=SYNC_BODY % (0, 0))
+    kb.install("graphify")
+    assert kb.mod.cmd_doctor(str(kb.project)) == 0
+    out = capsys.readouterr().out
+    assert "[OK ] no stale drawers - 0 gitignored, 0 missing" in out
+    assert "fix:" not in out
+
+
+def test_doctor_skips_the_stale_check_when_sync_reports_nothing(kb, capsys):
+    healthy_tools(kb)  # the fake prints no sync report at all
+    assert kb.mod.cmd_doctor(str(kb.project)) == 0
+    assert "stale drawers" not in capsys.readouterr().out
+
+
+def test_doctor_does_not_ask_sync_about_a_wing_the_palace_lacks(kb, capsys):
+    rec = kb.project / "calls.jsonl"
+    kb.install("mempalace", stdout="PALACE\nWING:  someone_elses_dialogue\n",
+               body=SYNC_BODY % (5, 0), record=rec)
+    kb.install("graphify")
+    kb.mod.cmd_doctor(str(kb.project))
+    calls = [json.loads(l) for l in rec.read_text(encoding="utf-8").splitlines()]
+    assert not any("sync" in c for c in calls)
+
+
+def test_stale_drawers_parses_both_figures_or_returns_none(kb):
+    parse = kb.mod.stale_drawers
+    assert parse("  Gitignored:     269  (would remove)\n  Missing:        0  (would remove)\n") == (269, 0)
+    assert parse("  Missing:        4\n") == (0, 4)
+    assert parse("PALACE\nWING:  x\n") is None
+    assert parse("") is None
+
+
 def test_doctor_json_is_a_list_of_checks(kb, capsys):
     healthy_tools(kb)
     assert kb.mod.main(["doctor", "--cwd", str(kb.project), "--json"]) == 0
