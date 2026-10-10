@@ -32,7 +32,9 @@ def install_runner(monkeypatch, cr, stdout=None, rc=None):
     def fake_popen(argv, **kwargs):
         argv = list(argv)
         cwd = kwargs.get("cwd")
-        calls.append(SimpleNamespace(argv=argv, cwd=cwd))
+        # env matters as much as argv now: it carries MEMPALACE_PALACE_PATH, which
+        # is what keeps a mempalace child process in this project's palace.
+        calls.append(SimpleNamespace(argv=argv, cwd=cwd, env=kwargs.get("env") or {}))
         return FakeProc(stdout(argv, cwd) if stdout else "",
                         rc(argv, cwd) if rc else 0)
 
@@ -90,7 +92,8 @@ def chain(gm_home, project, empty_path, tmp_path, monkeypatch):
     return SimpleNamespace(gm=gm, cr=cr, project=project, transcripts=transcripts,
                            exchanges=exchanges, mempalace=str(mempalace),
                            graphify=str(graphify), log=log, write_graph=write_graph,
-                           wing="proj_dialogue")
+                           wing="proj_dialogue",
+                           palace=str(gm.palace_path(project, cfg)))
 
 
 def result_of(chain, capsys, extra=()):
@@ -113,7 +116,8 @@ def test_default_plan_for_a_first_build(chain, capsys, monkeypatch, samefile):
     assert cmds[0].argv == [chain.gm.python_exe(),
                             str(chain.gm.SCRIPTS_DIR / "filter_transcripts.py"),
                             str(chain.transcripts), str(chain.exchanges)]
-    assert cmds[1].argv == [chain.mempalace, "mine", str(chain.exchanges),
+    assert cmds[1].argv == [chain.mempalace, "--palace", chain.palace,
+                            "mine", str(chain.exchanges),
                             "--mode", "projects", "--wing", chain.wing]
     assert cmds[2].argv == [chain.graphify, ".", "--code-only"]
     assert samefile(cmds[2].cwd, chain.project)
@@ -332,8 +336,11 @@ def test_missing_tools_stop_the_chain_and_log_the_fix(gm_home, project, empty_pa
     calls = install_runner(monkeypatch, cr)
     assert cr.main(["--project", str(project), "--json"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["notes"] == [
-        "stopped: cannot find mempalace, graphify; run /graph-mempalace:kb-setup"]
+    # The palace line is noted before anything else, so the notes are
+    # [palace, stopped]; the stop is the last word on what happened.
+    assert result["notes"][-1] == (
+        "stopped: cannot find mempalace, graphify; run /graph-mempalace:kb-setup")
+    assert result["notes"][0].startswith("palace: ")
     assert result["failed"] == ["prerequisites"]
     assert result["status"] == "failed:prerequisites"
     assert calls == []
@@ -377,12 +384,14 @@ def test_json_output_is_one_parseable_document(chain, capsys, monkeypatch):
     install_runner(monkeypatch, chain.cr)
     result = result_of(chain, capsys)
     assert set(result) == {"project", "session", "transcripts", "exchanges_dir",
-                           "wing", "exchanges", "drawers_added", "graph_a_nodes",
-                           "graph_b_nodes", "omitted", "seconds", "steps", "notes",
-                           "failed", "status", "log"}
+                           "wing", "palace", "skipped", "exchanges", "drawers_added",
+                           "graph_a_nodes", "graph_b_nodes", "omitted", "seconds",
+                           "steps", "notes", "failed", "status", "log"}
     assert result["project"] == "proj"
     assert result["session"] == "-"
     assert result["status"] == "ok"
+    assert result["palace"] == chain.palace
+    assert result["skipped"] == []
 
 
 def test_wait_prints_a_human_summary(chain, capsys, monkeypatch):
@@ -660,3 +669,134 @@ def test_a_chain_that_raised_still_writes_a_done_marker(chain, capsys, monkeypat
     capsys.readouterr()
     line = [ln for ln in chain.log().splitlines() if "=== compound done" in ln][-1]
     assert line.rstrip().endswith("status=failed:chain ===")
+
+
+# ------------------------------------------ one palace per project (0.2.0)
+
+def mine_call(calls):
+    """The recorded `mempalace ... mine ...` command."""
+    return [c for c in plan(calls) if "mine" in c.argv][0]
+
+
+def test_the_mine_is_scoped_to_this_projects_palace(chain, capsys, monkeypatch):
+    calls = install_runner(monkeypatch, chain.cr)
+    result = result_of(chain, capsys)
+    # --palace is a GLOBAL option of the mempalace CLI, so it has to come
+    # BEFORE the subcommand or mempalace rejects it.
+    assert mine_call(calls).argv[:4] == [chain.mempalace, "--palace",
+                                         chain.palace, "mine"]
+    assert result["palace"] == chain.palace
+    assert f"palace: {chain.palace}" in result["notes"]
+    assert f"palace: {chain.palace}" in chain.log()
+
+
+def test_the_steps_carry_the_palace_in_their_environment(chain, capsys, monkeypatch):
+    """A mempalace child that forgets --palace still has to land in this palace."""
+    calls = install_runner(monkeypatch, chain.cr)
+    result_of(chain, capsys)
+    assert mine_call(calls).env["MEMPALACE_PALACE_PATH"] == chain.palace
+
+
+def test_a_configured_palace_path_is_used_instead(chain, capsys, monkeypatch,
+                                                  write_config, tmp_path):
+    elsewhere = tmp_path / "shared-palace"
+    write_config(f'[palace]\npath = "{elsewhere.as_posix()}"\n')
+    calls = install_runner(monkeypatch, chain.cr)
+    result = result_of(chain, capsys)
+    assert result["palace"] == str(elsewhere)
+    assert mine_call(calls).argv[1:3] == ["--palace", str(elsewhere)]
+
+
+# -------------------------------------------------------------- --only STEPS
+
+def test_only_mine_runs_the_mine_and_nothing_else(chain, capsys, monkeypatch):
+    calls = install_runner(monkeypatch, chain.cr)
+    result = result_of(chain, capsys, ["--only", "mine"])
+    assert step_names(result) == ["mine"]
+    assert len(plan(calls)) == 1
+    assert result["skipped"] == ["filter", "graph_a", "graph_b"]
+    # Skipped is not failed: the marker still says the compound was fine.
+    assert result["failed"] == []
+    assert result["status"] == "ok"
+    assert "status=ok ===" in chain.log()
+    for label in ("filter", "graph A", "graph B"):
+        assert f"{label} skipped (not in --only)" in result["notes"]
+
+
+def test_only_graph_b_skips_the_filter_and_the_mine(chain, capsys, monkeypatch):
+    calls = install_runner(monkeypatch, chain.cr)
+    result = result_of(chain, capsys, ["--only", "graph_b"])
+    assert step_names(result) == ["graph B pass 1"]
+    assert result["skipped"] == ["filter", "mine", "graph_a"]
+    assert not [c for c in plan(calls) if "mine" in c.argv]
+    assert not [c for c in plan(calls) if "filter_transcripts.py" in " ".join(c.argv)]
+    assert result["status"] == "ok"
+
+
+def test_only_graph_a_still_clusters_with_its_own_graph(chain, capsys, monkeypatch,
+                                                        write_config):
+    """Clustering is not a step of its own: it belongs to the graph it names."""
+    write_config("[graph_a]\ncluster = true\n")
+    chain.write_graph(chain.gm.graph_a_path(chain.project))
+    install_runner(monkeypatch, chain.cr)
+    result = result_of(chain, capsys, ["--only", "graph_a"])
+    assert step_names(result) == ["graph A", "graph A cluster"]
+
+
+def test_no_graph_b_is_reported_as_a_skipped_step(chain, capsys, monkeypatch):
+    install_runner(monkeypatch, chain.cr)
+    result = result_of(chain, capsys, ["--no-graph-b"])
+    assert result["skipped"] == ["graph_b"]
+    assert "graph B skipped (--no-graph-b)" in result["notes"]
+
+
+def test_the_default_run_skips_nothing(chain, capsys, monkeypatch):
+    install_runner(monkeypatch, chain.cr)
+    assert result_of(chain, capsys)["skipped"] == []
+
+
+def test_the_human_summary_names_the_palace_and_the_skipped_steps(chain, capsys,
+                                                                  monkeypatch):
+    install_runner(monkeypatch, chain.cr)
+    assert chain.cr.main(["--project", str(chain.project), "--only", "mine",
+                          "--wait"]) == 0
+    out = capsys.readouterr().out
+    assert f"palace        {chain.palace}" in out
+    assert "skipped       filter, graph_a, graph_b" in out
+
+
+def test_an_unknown_step_name_is_an_argument_error(chain, capsys):
+    with pytest.raises(SystemExit) as exc:
+        chain.cr.main(["--project", str(chain.project), "--only", "graphs"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid step 'graphs'" in err
+    assert "choose from filter, mine, graph_a, graph_b" in err
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("mine", ["mine"]),
+    ("graph_b,filter", ["filter", "graph_b"]),      # chain order, not typed order
+    (" mine , graph_a ", ["mine", "graph_a"]),
+    ("filter,mine,graph_a,graph_b", ["filter", "mine", "graph_a", "graph_b"]),
+])
+def test_parse_only_normalises_the_step_list(chain, value, expected):
+    assert chain.cr.parse_only(value) == expected
+
+
+def test_parse_only_rejects_an_empty_list(chain, capsys):
+    with pytest.raises(SystemExit) as exc:
+        chain.cr.parse_only(" , ")
+    assert exc.value.code == 2
+    assert "an empty list" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("only,no_a,no_b,expected", [
+    (None, False, False, ["filter", "mine", "graph_a", "graph_b"]),
+    (None, True, False, ["filter", "mine", "graph_b"]),
+    (["mine", "graph_b"], False, True, ["mine"]),
+    (["graph_a"], True, False, []),
+])
+def test_selected_steps_resolves_both_switches(chain, only, no_a, no_b, expected):
+    args = SimpleNamespace(only=only, no_graph_a=no_a, no_graph_b=no_b)
+    assert chain.cr.selected_steps(args) == expected

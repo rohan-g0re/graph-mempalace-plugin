@@ -32,13 +32,27 @@ store for code: always current, line-addressable. Drawers mined from it
 duplicate the filesystem badly and go stale on the next edit while still
 looking authoritative.
 
+The mine writes into THIS project's own palace, the directory
+`gm_common.palace_path` names, and every mempalace command is built by
+`gm_common.mempalace_argv`, so no call here can forget `--palace` and land in
+the shared default one. A MemPalace search, its knowledge graph and the
+cross-wing tunnels it digs after every mine are all palace-wide: two projects
+sharing a palace would read each other's memory. One palace per project is what
+keeps them apart. MemPalace creates the directory on the first mine; nothing
+here creates it.
+
 Usage:
     compound_run.py [--project DIR] [--transcripts DIR] [--session ID]
-                    [--wait] [--no-graph-a] [--no-graph-b] [--json]
+                    [--wait] [--no-graph-a] [--no-graph-b] [--only STEPS]
+                    [--json]
 
 `--wait` prints a human summary to stdout; `--json` prints a machine summary.
 Without either, the only record is `~/.graph-mempalace/compound.log`, which is
 what the detached runs the Stop gate spawns rely on.
+
+`--only filter,mine` runs just the steps named, out of `filter`, `mine`,
+`graph_a` and `graph_b`. The rest do not run, are not failures, and come back
+under `skipped`.
 
 Exit code 0 on success and on every handled error, 1 only for a bad argument.
 """
@@ -97,6 +111,11 @@ LOCK_TOUCH_EVERY = 10           # refresh our own lock this often while waiting
 HEARTBEAT_SECONDS = 60          # and this often while a step's child runs
 
 SETUP_FIX = "run /graph-mempalace:kb-setup"
+
+# The steps `--only` can name, in the order the chain runs them. Clustering is
+# not in the vocabulary: it belongs to the graph step it names, and runs with it.
+# The sweep is not either - it is housekeeping and always runs.
+ONLY_STEPS = ("filter", "mine", "graph_a", "graph_b")
 
 
 class Step(NamedTuple):
@@ -342,8 +361,14 @@ def wait_holding_lock(seconds: float) -> None:
         gm.lock_touch()
 
 
-def run_mine(mempalace: str, exchanges: Path, wing: str, env: dict, note) -> Step:
-    """`mempalace mine`, waiting out another client that holds the palace.
+def run_mine(project: Path, cfg: dict, exchanges: Path, wing: str, env: dict,
+             note) -> Step:
+    """`mempalace --palace <this project's palace> mine`, waiting out another client.
+
+    The argv comes from `gm.mempalace_argv`, so the mine files the exchanges in
+    this project's own palace and never in the shared default one. `--palace` is
+    a global option of the mempalace CLI and goes before the subcommand, which
+    is the one reason this command is not assembled here by hand.
 
     A palace takes one writer at a time, so a mine can fail for a reason that
     has nothing to do with this project: another compound, or the user's own
@@ -356,7 +381,11 @@ def run_mine(mempalace: str, exchanges: Path, wing: str, env: dict, note) -> Ste
     wait leaves a note. Any other non-zero exit is returned at once: a real
     mine error is not fixed by waiting.
     """
-    argv = [mempalace, "mine", str(exchanges), "--mode", "projects", "--wing", wing]
+    argv = gm.mempalace_argv(project, cfg, "mine", str(exchanges),
+                             "--mode", "projects", "--wing", wing)
+    if argv is None:
+        # Unreachable: run_chain stops on a missing mempalace before this runs.
+        return Step("mine", 127, f"cannot find mempalace; {SETUP_FIX}", 0.0, False)
     attempt = 0
     while True:
         mined = step("mine", argv, env=env, timeout=MINE_TIMEOUT)
@@ -464,11 +493,55 @@ def cluster_argv(graphify: str, concurrency: int) -> list[str]:
             "--batch-size", "100", "--max-concurrency", str(concurrency)]
 
 
+# ---------------------------------------------------------------------------
+# which steps this run is allowed to execute
+# ---------------------------------------------------------------------------
+def parse_only(value: str) -> list[str]:
+    """`--only graph_b,mine` -> ["mine", "graph_b"], in chain order.
+
+    A name that is not one of `ONLY_STEPS`, and an empty list, exit 2 before
+    anything runs: the one caller that passes this flag is the SessionStart
+    hook, and a typo there has to be loud rather than silently compound less
+    than it meant to. 2 is argparse's own code for an unusable argument value;
+    1 stays what a bad `--project` returns.
+    """
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    unknown = [n for n in names if n not in ONLY_STEPS]
+    if unknown or not names:
+        bad = ", ".join(repr(n) for n in unknown) or "an empty list"
+        print(f"compound_run.py: argument --only: invalid step {bad} "
+              f"(choose from {', '.join(ONLY_STEPS)})", file=sys.stderr)
+        raise SystemExit(2)
+    return [s for s in ONLY_STEPS if s in names]
+
+
+def selected_steps(args: argparse.Namespace) -> list[str]:
+    """The steps that will run: `--only` if it was given, minus `--no-graph-*`.
+
+    Both switches mean the same thing to the chain - do not run this step, and
+    do not call it a failure - so they are resolved into one list here instead
+    of being tested separately at each step.
+    """
+    chosen = list(getattr(args, "only", None) or ONLY_STEPS)
+    off = set()
+    if getattr(args, "no_graph_a", False):
+        off.add("graph_a")
+    if getattr(args, "no_graph_b", False):
+        off.add("graph_b")
+    return [s for s in ONLY_STEPS if s in chosen and s not in off]
+
+
+def skipped_note(label: str, flag: str | None) -> str:
+    """Why a step did not run: the flag that switched it off, or `--only`."""
+    return f"{label} skipped ({flag})" if flag else f"{label} skipped (not in --only)"
+
+
 def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: Path,
               exchanges: Path, wing: str, token: str, session: str) -> dict:
     """Run every enabled step and return the summary. Never raises."""
     started = time.monotonic()
     gm.append_log(f"=== compound start project={token} session={session} ===")
+    palace = gm.palace_path(project, cfg)
 
     result: dict = {
         "project": token,
@@ -476,6 +549,8 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
         "transcripts": str(transcripts),
         "exchanges_dir": str(exchanges),
         "wing": wing,
+        "palace": str(palace),
+        "skipped": [],
         "exchanges": None,
         "drawers_added": None,
         "graph_a_nodes": None,
@@ -500,9 +575,17 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
                                 "seconds": round(step.seconds, 1),
                                 "timed_out": step.timed_out})
 
-    env = gm.tool_env(cfg)
-    want_a = not args.no_graph_a
-    want_b = not args.no_graph_b
+    # Which palace this run writes to is the first thing the log should say: a
+    # mine that filed drawers somewhere unexpected is otherwise invisible.
+    note(f"palace: {palace}")
+
+    # MEMPALACE_PALACE_PATH is in the environment as well as on the command
+    # line, so a mempalace child process (its hub) lands in the same palace.
+    env = gm.tool_env(cfg, project)
+    selected = selected_steps(args)
+    result["skipped"] = [s for s in ONLY_STEPS if s not in selected]
+    want_a = "graph_a" in selected
+    want_b = "graph_b" in selected
     concurrency_b = int(cfg["graph_b"]["concurrency"])
 
     mempalace = gm.find_tool("mempalace")
@@ -521,7 +604,9 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
         return result
 
     # 1. transcripts -> one markdown file per exchange
-    if transcripts.is_dir():
+    if "filter" not in selected:
+        note(skipped_note("filter", None))
+    elif transcripts.is_dir():
         record(step(
             "filter",
             [gm.python_exe(), str(gm.SCRIPTS_DIR / "filter_transcripts.py"),
@@ -533,9 +618,11 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
 
     result["exchanges"] = count_exchanges(exchanges)
 
-    # 2. exchanges -> MemPalace
-    if exchanges.is_dir() and result["exchanges"]:
-        mined = run_mine(mempalace, exchanges, wing, env, note)
+    # 2. exchanges -> MemPalace, in this project's own palace
+    if "mine" not in selected:
+        note(skipped_note("mine", None))
+    elif exchanges.is_dir() and result["exchanges"]:
+        mined = run_mine(project, cfg, exchanges, wing, env, note)
         record(mined)
         result["drawers_added"] = drawers_from_mine(mined.out)
         if mined.rc != 0 and PALACE_HELD in (mined.out or ""):
@@ -562,7 +649,7 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
             record(step("graph A cluster", cluster_argv(graphify, concurrency_b),
                         cwd=str(project), env=env, timeout=GRAPHIFY_TIMEOUT))
     else:
-        note("graph A skipped (--no-graph-a)")
+        note(skipped_note("graph A", "--no-graph-a" if args.no_graph_a else None))
 
     # 4. Graph B - the chat graph, in the exchanges directory
     if want_b and exchanges.is_dir():
@@ -603,7 +690,7 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
             record(step("graph B cluster", cluster_argv(graphify, concurrency_b),
                         cwd=str(exchanges), env=env, timeout=GRAPHIFY_TIMEOUT))
     elif not want_b:
-        note("graph B skipped (--no-graph-b)")
+        note(skipped_note("graph B", "--no-graph-b" if args.no_graph_b else None))
     else:
         note(f"no exchanges directory at {exchanges}; skipped graph B")
 
@@ -634,11 +721,16 @@ def human_summary(result: dict) -> str:
         ("Graph B nodes", _n(result.get("graph_b_nodes"))),
         ("files omitted", _n(result.get("omitted"))),
         ("wing", result.get("wing")),
+        ("palace", result.get("palace")),
         ("exchanges dir", result.get("exchanges_dir")),
         ("log", result.get("log")),
     ]
     lines = [f"compound finished in {clock}"]
     lines += [f"  {label:<14}{value}" for label, value in rows]
+    if result.get("skipped"):
+        # Named steps that did not run, so a short summary cannot be mistaken
+        # for a full compound.
+        lines.append(f"  {'skipped':<14}" + ", ".join(result["skipped"]))
     if result.get("failed"):
         lines.append("  FAILED: " + ", ".join(result["failed"]) + " (see the log, then re-run)")
     failed = [s for s in result.get("steps", []) if s.get("rc")]
@@ -682,6 +774,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip the code graph")
     parser.add_argument("--no-graph-b", action="store_true",
                         help="skip the chat graph (the slow, LLM-backed step)")
+    parser.add_argument("--only", type=parse_only, default=None, metavar="STEPS",
+                        help="run only these steps, comma separated, out of "
+                             + ",".join(ONLY_STEPS)
+                             + " (clustering runs with its own graph step)")
     parser.add_argument("--json", dest="as_json", action="store_true",
                         help="print a machine-readable summary to stdout")
     return parser
@@ -715,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
         # `status` says why there is no result.
         if args.as_json:
             print(json.dumps({"project": token, "session": session, "seconds": 0,
+                              "palace": str(gm.palace_path(project, cfg)),
                               "notes": [message], "failed": [],
                               "status": "skipped:locked",
                               "log": str(gm.LOG_PATH), "steps": []}, indent=2))
@@ -727,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # a broken chain still releases the lock and exits 0
         gm.append_log(f"compound error: {type(exc).__name__}: {exc}")
         result = {"project": token, "session": session, "seconds": 0,
+                  "palace": str(gm.palace_path(project, cfg)),
                   "notes": [f"failed: {type(exc).__name__}: {exc}"],
                   "failed": ["chain"], "status": "failed:chain",
                   "log": str(gm.LOG_PATH), "steps": []}

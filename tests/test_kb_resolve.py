@@ -55,6 +55,11 @@ def kb(gm_home, project, empty_path, tmp_path, monkeypatch, make_tool):
     write_graph(gm.graph_a_path(project), ["scripts/gm_common.py"])
     write_graph(gm.graph_b_path(project), [MD_NAME])
 
+    # One palace per project, created by `mempalace mine`. A healthy tree has
+    # been compounded at least once, so the directory is there.
+    palace = gm.palace_path(project)
+    palace.mkdir(parents=True, exist_ok=True)
+
     bins = tmp_path / "bins"
     kbmod = importlib.import_module("kb_resolve")
 
@@ -66,7 +71,7 @@ def kb(gm_home, project, empty_path, tmp_path, monkeypatch, make_tool):
 
     return SimpleNamespace(gm=gm, mod=kbmod, project=project, dd=dd,
                            install=install, write_graph=write_graph,
-                           wing="proj_dialogue")
+                           wing="proj_dialogue", palace=palace)
 
 
 def healthy_tools(kb, graphify_stdout=""):
@@ -196,6 +201,9 @@ def test_doctor_fails_when_the_wing_is_not_in_the_palace(kb, capsys):
     out = capsys.readouterr().out
     assert "[FAIL] dialogue wing present" in out
     assert "[OK ] palace reachable" in out
+    # The wing is in no palace at all, so the fix is a plain compound.
+    assert f"dialogue wing present - {kb.wing} - fix: /graph-mempalace:kb-compound" in out
+    assert "shared 0.1.0 palace" not in out
 
 
 SYNC_BODY = (
@@ -213,7 +221,10 @@ def test_doctor_flags_stale_drawers_and_names_the_fix(kb, capsys):
     assert kb.mod.cmd_doctor(str(kb.project)) == 1
     out = capsys.readouterr().out
     assert "[FAIL] no stale drawers - 261 gitignored, 3 missing" in out
-    assert f"fix: mempalace sync --apply --wing {kb.wing}" in out
+    # The printed fix is the WHOLE command: pasted without --palace it would
+    # prune the shared palace rather than this project's.
+    assert (f"fix: mempalace --palace {kb.palace} sync --apply --wing {kb.wing}"
+            in out)
 
 
 def test_doctor_passes_the_stale_check_on_a_clean_wing(kb, capsys):
@@ -265,6 +276,104 @@ def test_doctor_json_exits_one_when_a_link_is_broken(kb, capsys):
     assert kb.mod.main(["doctor", "--cwd", str(kb.project), "--json"]) == 1
     checks = json.loads(capsys.readouterr().out)
     assert any(not c["ok"] for c in checks)
+
+
+# --------------------------------------- one palace per project (0.2.0)
+
+# A fake mempalace that answers differently depending on whether it was given
+# --palace: the project palace is empty, the shared 0.1.0 palace still has the
+# wing. This is the tree a 0.1.0 user has before the first 0.2.0 compound.
+SHARED_ONLY_BODY = (
+    "wing = %r\n"
+    "if '--palace' in sys.argv:\n"
+    "    sys.stdout.write('PALACE\\n')\n"
+    "else:\n"
+    "    sys.stdout.write('PALACE\\nWING:  ' + wing + '\\n')\n"
+)
+
+# The same shape, but the wing IS in the project palace.
+PALACE_BODY = (
+    "wing = %r\n"
+    "if '--palace' in sys.argv:\n"
+    "    sys.stdout.write('PALACE\\nWING:  ' + wing + '\\n')\n"
+    "else:\n"
+    "    sys.stdout.write('PALACE\\n')\n"
+)
+
+
+def recorded(path):
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_doctor_reports_the_palace_it_is_scoped_to(kb, capsys):
+    healthy_tools(kb)
+    assert kb.mod.cmd_doctor(str(kb.project)) == 0
+    assert f"[OK ] palace - {kb.palace}" in capsys.readouterr().out
+
+
+def test_doctor_fails_when_the_palace_has_not_been_built(kb, capsys):
+    healthy_tools(kb)
+    kb.palace.rmdir()
+    assert kb.mod.cmd_doctor(str(kb.project)) == 1
+    out = capsys.readouterr().out
+    assert f"[FAIL] palace - {kb.palace} - not built yet" in out
+    assert "fix: /graph-mempalace:kb-compound" in out
+
+
+def test_every_doctor_call_names_this_projects_palace(kb, capsys):
+    rec = kb.project / "calls.jsonl"
+    kb.install("mempalace", body=PALACE_BODY % kb.wing, record=rec)
+    kb.install("graphify")
+    assert kb.mod.cmd_doctor(str(kb.project)) == 0
+    capsys.readouterr()
+    calls = recorded(rec)
+    assert [c[2] for c in calls] == ["status", "sync"]
+    for argv in calls:
+        assert argv[:2] == ["--palace", str(kb.palace)]
+
+
+def test_doctor_says_when_the_wing_is_still_in_the_shared_palace(kb, capsys):
+    rec = kb.project / "calls.jsonl"
+    kb.install("mempalace", body=SHARED_ONLY_BODY % kb.wing, record=rec)
+    kb.install("graphify")
+    assert kb.mod.cmd_doctor(str(kb.project)) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] dialogue wing present" in out
+    assert (f"{kb.wing} - exists only in the shared 0.1.0 palace "
+            "- fix: /graph-mempalace:kb-compound (moves it)") in out
+    # The shared palace is asked exactly once, and only without --palace.
+    plain = [c for c in recorded(rec) if "--palace" not in c]
+    assert plain == [["status"]]
+
+
+def test_search_is_scoped_to_this_projects_palace(kb, capsys):
+    rec = kb.project / "search.jsonl"
+    kb.install("mempalace", stdout="", record=rec)
+    assert kb.mod.cmd_search("wing collision", str(kb.project)) == 0
+    capsys.readouterr()
+    argv = recorded(rec)[0]
+    assert argv[:4] == ["--palace", str(kb.palace), "search", "wing collision"]
+    assert argv[argv.index("--wing") + 1] == kb.wing
+
+
+def test_search_without_mempalace_says_so_and_exits_zero(kb, capsys):
+    assert kb.mod.cmd_search("anything", str(kb.project)) == 0
+    assert "mempalace not found - fix: /graph-mempalace:kb-setup" in \
+        capsys.readouterr().out
+
+
+def test_a_configured_palace_path_is_the_one_checked(kb, capsys, write_config,
+                                                     tmp_path):
+    elsewhere = tmp_path / "shared-palace"
+    elsewhere.mkdir()
+    write_config(f'[palace]\npath = "{elsewhere.as_posix()}"\n')
+    rec = kb.project / "calls.jsonl"
+    kb.install("mempalace", body=PALACE_BODY % kb.wing, record=rec)
+    kb.install("graphify")
+    assert kb.mod.cmd_doctor(str(kb.project)) == 0
+    assert f"[OK ] palace - {elsewhere}" in capsys.readouterr().out
+    assert recorded(rec)[0][:2] == ["--palace", str(elsewhere)]
 
 
 # ------------------------------------------------------------------------ ask

@@ -46,6 +46,17 @@ Paths, the palace wing and the tool binaries all come from gm_common, so this
 resolver, the SessionStart hook, the gate and the compound chain cannot drift
 apart.
 
+One palace per project
+----------------------
+Every MemPalace command here is built by `gm_common.mempalace_argv`, which puts
+`--palace <this project's palace>` in front of the subcommand. A search, the
+knowledge graph and the cross-wing tunnels MemPalace digs after every mine are
+all palace-wide, so a call that forgot `--palace` would read the shared default
+palace and answer this project's question out of another project's memory. The
+only call that deliberately looks outside is in `doctor`: when this project's
+wing is missing it asks the plain `mempalace status` once, so it can say
+"your wing is still in the shared 0.1.0 palace" instead of "your wing is gone".
+
 Nothing here writes to a store. Reading the wing name may record the derived
 name in ~/.graph-mempalace/wings.json; nothing else is written.
 """
@@ -64,6 +75,8 @@ from gm_common import (  # noqa: E402
     graph_a_path,
     graph_b_path,
     load_config,
+    mempalace_argv,
+    palace_path,
     wing_for,
 )
 
@@ -143,6 +156,12 @@ def files_from_graph_output(text: str) -> list[str]:
 
 # ------------------------------------------------------------------ commands
 
+# The two fixes every failure here resolves to: a missing tool is a setup
+# problem, an unbuilt palace or an unmined wing is a compound problem.
+SETUP_FIX = "/graph-mempalace:kb-setup"
+COMPOUND_FIX = "/graph-mempalace:kb-compound"
+
+
 def cmd_get(exchange_id: str, cwd: str, chars: int = 4000) -> int:
     """Print one exchange in full from its stable id."""
     dd = _dialogue_dir(cwd)
@@ -167,11 +186,19 @@ def cmd_get(exchange_id: str, cwd: str, chars: int = 4000) -> int:
 
 
 def cmd_search(text: str, cwd: str, results: int = 5) -> int:
-    """Semantic search for when you do not know the id. Returns ids."""
+    """Semantic search for when you do not know the id. Returns ids.
+
+    Scoped to this project's palace and to its wing: a palace-wide search would
+    reach other projects' drawers, and nothing here could tell them apart.
+    """
     cfg = load_config(cwd)
     wing = wing_for(cwd, cfg, record=False)
-    mempalace = find_tool("mempalace") or "mempalace"
-    out = run([mempalace, "search", text, "--wing", wing, "--results", str(results)])
+    argv = mempalace_argv(cwd, cfg, "search", text, "--wing", wing,
+                          "--results", str(results))
+    if argv is None:
+        print(f"mempalace not found - fix: {SETUP_FIX}")
+        return 0
+    out = run(argv)
     out = "\n".join(l for l in out.splitlines()
                     if "EmbedderIdentity" not in l and "_enforce_embedder" not in l)
     print(out.strip() or "(no results - is the palace mined?)")
@@ -239,7 +266,12 @@ def cmd_ask(question: str, cwd: str, want_code: bool = False, want_chat: bool = 
     return 0
 
 
-SETUP_FIX = "/graph-mempalace:kb-setup"
+WING_LINE = re.compile(r"WING:\s+(\S+)")
+
+
+def wings_from_status(status_output: str) -> list[str]:
+    """The wing names in a `mempalace status` report."""
+    return WING_LINE.findall(status_output or "")
 
 
 def doctor_checks(cwd: str) -> tuple[list[dict], dict]:
@@ -247,6 +279,11 @@ def doctor_checks(cwd: str) -> tuple[list[dict], dict]:
 
     Each check is {"check": label, "ok": bool, "detail": str}. `extras` carries
     the numbers the printed report uses for its NEXT hint.
+
+    The palace checks are about THIS project's palace: whether it has been
+    built, whether MemPalace can open it, and whether this project's wing is
+    inside it. Only when the wing is missing is the shared 0.1.0 palace
+    consulted, to tell "not moved yet" from "never mined".
     """
     cfg = load_config(cwd)
     checks: list[dict] = []
@@ -286,25 +323,47 @@ def doctor_checks(cwd: str) -> tuple[list[dict], dict]:
         except Exception as e:
             chk("Graph B parses", False, str(e)[:80])
 
+    # This project's own palace. MemPalace creates it on the first mine, so a
+    # missing directory means "never compounded", not "broken".
+    palace = palace_path(cwd, cfg)
+    built = palace.is_dir()
+    chk("palace", built,
+        str(palace) if built else f"{palace} - not built yet - fix: {COMPOUND_FIX}")
+
     wings: list[str] = []
     if mempalace:
-        out = run([mempalace, "status"])
-        wings = re.findall(r"WING:\s+(\S+)", out)
+        wings = wings_from_status(run(mempalace_argv(cwd, cfg, "status")))
     chk("palace reachable", bool(wings), ", ".join(wings) or "no wings")
+
     wing = wing_for(cwd, cfg, record=False)
-    chk("dialogue wing present", wing in wings, wing)
+    if wing in wings:
+        chk("dialogue wing present", True, wing)
+    else:
+        # 0.1.0 mined every project into one shared palace. A wing that is
+        # there but not here has not been lost, it has not been moved yet, and
+        # the next compound moves it - which is a different message to the user
+        # than "nothing has ever been mined".
+        detail = f"{wing} - fix: {COMPOUND_FIX}"
+        if mempalace and wing in wings_from_status(run([mempalace, "status"])):
+            detail = (f"{wing} - exists only in the shared 0.1.0 palace "
+                      f"- fix: {COMPOUND_FIX} (moves it)")
+        chk("dialogue wing present", False, detail)
 
     # Drawers whose source file is gitignored or gone are junk in every search
     # result; `sync --dry-run` counts them without changing anything. The check
     # is skipped (not failed) when the installed MemPalace has no sync report.
     if mempalace and wing in wings:
-        stale = stale_drawers(run([mempalace, "sync", "--dry-run", "--wing", wing]))
+        stale = stale_drawers(run(mempalace_argv(cwd, cfg, "sync", "--dry-run",
+                                                 "--wing", wing)))
         if stale is not None:
             gitignored, missing = stale
             total = gitignored + missing
             detail = f"{gitignored} gitignored, {missing} missing"
             if total:
-                detail += f" - fix: mempalace sync --apply --wing {wing}"
+                # The whole command, palace included: pasted without --palace it
+                # would prune the shared palace instead of this project's.
+                detail += (f" - fix: mempalace --palace {palace} "
+                           f"sync --apply --wing {wing}")
             chk("no stale drawers", total == 0, detail)
 
     return checks, {"linked": linked, "exchanges": len(idx), "dialogue_dir": dd}
