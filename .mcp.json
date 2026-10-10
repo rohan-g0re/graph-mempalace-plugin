@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "mempalace": {
-      "command": "${GM_MEMPALACE_MCP_BIN:-mempalace-mcp}",
-      "args": []
+      "command": "${GM_PYTHON:-python}",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp_launch.py", "mempalace"]
     },
     "graphify": {
       "command": "${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}",
