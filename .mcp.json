@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mempalace": {
+      "command": "${GM_MEMPALACE_MCP_BIN:-mempalace-mcp}",
+      "args": []
+    },
+    "graphify": {
+      "command": "${GM_GRAPHIFY_MCP_BIN:-graphify-mcp}",
+      "args": []
+    }
+  }
+}

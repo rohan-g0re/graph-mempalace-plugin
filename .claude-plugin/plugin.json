@@ -1,0 +1,26 @@
+{
+  "name": "graph-mempalace",
+  "version": "0.1.0",
+  "description": "Builds a knowledge base from a project's own conversation transcripts and code, and answers questions about past work from the verbatim exchange or the file rather than from a summary.",
+  "author": {
+    "name": "rohan-g0re",
+    "url": "https://github.com/rohan-g0re"
+  },
+  "homepage": "https://github.com/rohan-g0re/graph-mempalace-plugin",
+  "repository": "https://github.com/rohan-g0re/graph-mempalace-plugin",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "knowledge-graph",
+    "mempalace",
+    "graphify",
+    "conversation-history",
+    "compounding",
+    "hooks",
+    "mcp",
+    "project-memory",
+    "recall",
+    "retrieval",
+    "transcripts"
+  ]
+}

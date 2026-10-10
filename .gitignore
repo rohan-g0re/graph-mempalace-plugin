@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
+Thumbs.db
+# Claude Code plugin runtime markers
+.in_use/
+# local eval artefacts
+evals/**/results/
+aggregate-result.json

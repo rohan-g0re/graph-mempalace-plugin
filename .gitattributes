@@ -1,0 +1,5 @@
+# Scripts and hooks must stay LF on every platform; CRLF breaks shebangs and bash.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary

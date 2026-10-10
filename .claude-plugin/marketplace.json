@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "graph-mempalace",
+  "description": "Knowledge base for a project's past conversations and code: MemPalace holds the verbatim exchanges, two Graphify graphs route to them, and hooks keep both current.",
+  "owner": {
+    "name": "rohan-g0re",
+    "url": "https://github.com/rohan-g0re"
+  },
+  "plugins": [
+    {
+      "name": "graph-mempalace",
+      "description": "Builds a knowledge base from a project's own conversation transcripts and code, and answers questions about past work from the verbatim exchange or the file rather than from a summary.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
