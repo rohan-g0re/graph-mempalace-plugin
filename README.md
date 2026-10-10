@@ -301,7 +301,7 @@ stays until you remove it by hand (DESIGN §8).
 - Hooks never block. They exit 0 on every error and log instead.
 - Tests run on Linux, Windows and macOS, on Python 3.11 and 3.12. Portability is a
   test, not an intention.
-- CI runs `claude plugin validate . --strict --json`, so unknown manifest keys fail
+- CI runs `claude plugin validate . --strict`, so unknown manifest keys fail
   loudly instead of loading silently.
 
 More: [docs/architecture.md](docs/architecture.md), [docs/DESIGN.md](docs/DESIGN.md),

@@ -58,7 +58,7 @@ reason. `docs/DESIGN.md` is the contract; this file is how to write to it.
 - [ ] Every manifest path starts with `./`. Reason: validation fails otherwise.
 - [ ] `homepage` must be a valid URL. Reason: it is the one metadata field that
       stops the plugin loading.
-- [ ] Run `claude plugin validate . --strict --json` after touching any manifest,
+- [ ] Run `claude plugin validate . --strict` after touching any manifest,
       skill or hook. Reason: unknown keys load silently otherwise.
 - [ ] Do not bump `version` in a feature change. Releases do it, with a CHANGELOG
       entry, in one commit. Reason: pin semantics; users update when it changes.
@@ -79,7 +79,7 @@ reason. `docs/DESIGN.md` is the contract; this file is how to write to it.
 ## Quick checks
 
 ```bash
-claude plugin validate . --strict --json
+claude plugin validate . --strict
 python -m pytest -q
 grep -rnE '\]\((\./)?(references|scripts)/' skills/      # should print nothing
 grep -rn 'CLAUDE_PLUGIN_ROOT' skills/ | grep -v '"\${CLAUDE_PLUGIN_ROOT}' # unquoted uses: none

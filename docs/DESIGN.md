@@ -38,7 +38,7 @@ machine, opens any repo, and the knowledge base starts accumulating.
 | skills | `graph-mempalace` (model-invoked), `kb-setup`, `kb-compound`, `kb-doctor`, `kb-ask` (user-invoked) |
 | slash form | `/graph-mempalace:kb-ask ...` etc. |
 | state dir | `~/.graph-mempalace/` |
-| user config | `~/.graph-mempalace/config.toml`; per-project override `<repo>/.graph-mempalace.toml` |
+| config | `~/.graph-mempalace/config.toml` (user, machine-wide) <- `~/.graph-mempalace/projects/<slug>/config.toml` (user, one project) <- `<repo>/.graph-mempalace.toml` (repo; no `[palace]`) |
 
 No colons, no `claude`/`anthropic` in any name (validator rules). Kebab-case.
 
@@ -110,7 +110,7 @@ No `CLAUDE.md` at the plugin root: the validator warns on it and CI runs
   `/plugin install graph-mempalace@graph-mempalace`.
 - Versioning: `version` set and bumped per release (pin semantics). Validator
   warns when missing; `claude plugin tag` cuts `graph-mempalace--vX.Y.Z` tags.
-- CI gate: `claude plugin validate . --strict --json`.
+- CI gate: `claude plugin validate . --strict`.
 - `claude plugin details graph-mempalace` prints always-on token cost; check it.
 - Shell-form hook commands run in `sh -c` on macOS/Linux and in Git Bash on
   Windows (PowerShell only when Git Bash is not installed — and then Claude Code
@@ -397,7 +397,7 @@ do the work; the skill runs them and presents results (script-first).
 force), config (defaults, override, bad type, unknown key), common (slug on
 Windows and POSIX paths, token, wing collision), chain (plan of commands for each
 config, lock release on failure), resolver (id extraction, doctor against a fake
-tree). CI: `claude plugin validate . --strict --json` on ubuntu; pytest on
+tree). CI: `claude plugin validate . --strict` on ubuntu; pytest on
 ubuntu/windows/macos × Python 3.11/3.12.
 
 ## 8. Privacy and safety statements (must appear in README and SECURITY.md)

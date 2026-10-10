@@ -17,7 +17,7 @@ contributing is reading two files first.
 Two commands. Both must pass before you open a pull request.
 
 ```bash
-claude plugin validate . --strict --json
+claude plugin validate . --strict
 python -m pytest -q
 ```
 

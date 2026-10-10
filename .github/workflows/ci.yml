@@ -20,11 +20,12 @@ jobs:
 
       # `claude plugin validate` is offline and needs no login: it reads the
       # manifests, skills and hooks from disk and makes no API call. Verified
-      # locally 2026-10-10 on Claude Code 2.1.273. --strict turns warnings into
+      # locally 2026-10-10 on Claude Code 2.1.273. (--json exists on some CLI
+      # versions and not others, so CI relies on the exit code.) --strict turns warnings into
       # failures, which is the point -- an unknown manifest key otherwise loads
       # silently and does nothing.
       - name: Validate plugin
-        run: claude plugin validate . --strict --json
+        run: claude plugin validate . --strict
 
   test:
     name: pytest (${{ matrix.os }}, Python ${{ matrix.python }})

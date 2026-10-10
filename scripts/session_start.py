@@ -101,11 +101,14 @@ def node_count(path: Path) -> int | None:
     return len(nodes) if isinstance(nodes, list) else None
 
 
-def last_done_line() -> str | None:
+def last_done_line(token: str | None = None) -> str | None:
     """The newest `=== compound done` line in the log, or None.
 
-    Reads only the tail of the log and scans it backwards, so the size of a log
-    that has been accumulating for months does not matter.
+    With `token` given, only markers for that project count (`project=<token> `
+    is in every marker); the log is shared by every project on the machine, and
+    one project's status line must not report another project's run. Reads only
+    the tail of the log and scans it backwards, so the size of a log that has
+    been accumulating for months does not matter.
     """
     try:
         size = gm.LOG_PATH.stat().st_size
@@ -114,8 +117,11 @@ def last_done_line() -> str | None:
             chunk = fh.read()
     except OSError:
         return None
+    needle = f"project={token} ".encode() if token else None
     for raw in reversed(chunk.split(b"\n")):
         if DONE_MARKER.encode() not in raw:
+            continue
+        if needle and needle not in raw:
             continue
         line = raw.decode("utf-8", "replace").lstrip()
         if STAMP.match(line):
@@ -163,9 +169,11 @@ def failure_note(status: str | None) -> str:
 
 
 def status_line(project: str, cfg: dict) -> str:
-    """One line of state: exchanges, Graph B nodes, when it last compounded."""
-    done = last_done_line()
-    tail = failure_note(last_status(done))
+    """One line of state: exchanges, Graph B nodes, when THIS project last compounded."""
+    done = last_done_line(gm.project_token(project))
+    # No marker for THIS project means no compound to report - do not let the
+    # accessors fall back to the newest marker of some other project.
+    tail = failure_note(last_status(done)) if done else ""
     exchanges = count_exchanges(gm.exchanges_dir(project, cfg))
     if not exchanges:
         return "graph-mempalace: not ingested yet" + tail
@@ -173,7 +181,7 @@ def status_line(project: str, cfg: dict) -> str:
     nodes = node_count(gm.graph_b_path(project, cfg))
     if nodes is not None:
         bits.append(f"Graph B {nodes:,} nodes")
-    when = last_compound(done)
+    when = last_compound(done) if done else None
     if when:
         bits.append(f"last compound {when}")
     return "graph-mempalace: " + " · ".join(bits) + tail
