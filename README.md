@@ -1,5 +1,9 @@
 # graph-mempalace
 
+<p align="center">
+  <img src="docs/img/graph-mempalace.jpg" alt="graph-mempalace 0.2.0: remember what you said and did" width="560">
+</p>
+
 A knowledge base of this project's past conversations and code that builds and
 updates itself. Two graphs route; MemPalace and the repository answer.
 
