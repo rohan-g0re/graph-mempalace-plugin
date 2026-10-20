@@ -89,6 +89,18 @@ GRAPH_SIZE_LIMIT = 200 * 1024 * 1024
 # STATUS_CONTROL_C_EXIT on Windows (a console closing or Ctrl+C reaching the
 # child), SIGINT/SIGTERM on POSIX. One retry is worth it for those.
 INTERRUPTED_RCS = {3221225786, -1073741510, -2, -15, 130, 143}
+
+# Graphify's shrink guard prints this (to stderr, which `run_step` keeps in the
+# step's output) when an exchange it re-extracted came back with fewer nodes
+# than it had before, and then refuses to write the graph. For the chat graph
+# that refusal is wrong: an exchange file only changes when its text changed,
+# and an LLM backend gives a slightly different node count on every run, so
+# fewer nodes is not lost data. Left alone, the refused files stay unstamped,
+# are re-extracted next run, fluctuate again, and the chat graph never updates.
+# The cure is one re-run with `--allow-partial`; Graphify cached the extraction
+# before it refused, so that re-run is cheap.
+SHRINK_REFUSED = "unverified semantic shrink detected"
+ALLOW_PARTIAL = "--allow-partial"
 MAX_LOG_LINES = 2000                 # per step, so one chatty run cannot bloat the log
 
 FILTER_TIMEOUT = 10 * 60
@@ -658,12 +670,21 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
         extract = [graphify, ".", "--backend", "claude-cli",
                    "--max-concurrency", str(concurrency_b),
                    "--token-budget", str(budget)]
+        # The command for the pass about to run. It only differs from `extract`
+        # during the one shrink-guard retry, and an interrupted retry repeats
+        # whatever was interrupted, so it is kept until a pass finishes.
+        pass_argv = extract
         attempt = 0
         interrupted_retry = False
+        shrink_retry = False
+        # Did any pass write the graph this run? An old graph.json on disk says
+        # nothing about this run: checking only for the file is how a chat
+        # graph stayed frozen for days while every run reported status=ok.
+        updated = False
         last_rc = 0
         while attempt < passes:
             attempt += 1
-            extracted = step(f"graph B pass {attempt}", extract,
+            extracted = step(f"graph B pass {attempt}", pass_argv,
                              cwd=str(exchanges), env=env, timeout=GRAPHIFY_TIMEOUT)
             record(extracted)
             last_rc = extracted.rc
@@ -673,9 +694,23 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
                 attempt -= 1
                 note(f"graph B pass was interrupted (rc={extracted.rc}); retrying once")
                 continue
+            if (extracted.rc != 0 and not shrink_retry
+                    and SHRINK_REFUSED in (extracted.out or "")):
+                # See SHRINK_REFUSED. Once per run, like the interrupted retry,
+                # and it does not use up a pass.
+                shrink_retry = True
+                attempt -= 1
+                pass_argv = extract + [ALLOW_PARTIAL]
+                note(f"graphify refused to write graph B because a changed exchange "
+                     f"gave fewer nodes than before, which is normal for an LLM and "
+                     f"not lost data; retrying pass {attempt + 1} once with "
+                     f"{ALLOW_PARTIAL}")
+                continue
+            pass_argv = extract
             if extracted.rc != 0:
                 note(f"graph B pass {attempt} failed (rc={extracted.rc})")
                 break
+            updated = True
             left = omitted_from(extracted.out)
             result["omitted"] = 0 if left is None else left
             if not left:
@@ -683,9 +718,17 @@ def run_chain(args: argparse.Namespace, cfg: dict, project: Path, transcripts: P
             if attempt < passes:
                 note(f"{left} file(s) produced no nodes; running pass {attempt + 1}")
         graph_b_file = gm.graph_b_path(project, cfg)
-        if last_rc != 0 and not graph_b_file.exists():
+        if not updated:
+            # No pass wrote the graph this run, so new exchanges are not in it.
+            # That is a failure even when an older graph is still on disk, or
+            # the SessionStart banner never says the chat graph is stale.
             result["failed"].append("graph B")
-            note("graph B did not produce a graph; run /graph-mempalace:kb-compound to retry")
+            if graph_b_file.exists():
+                note(f"graph B was not updated (rc={last_rc}); the chat graph is stale; "
+                     "run /graph-mempalace:kb-compound to retry")
+            else:
+                note("graph B did not produce a graph; "
+                     "run /graph-mempalace:kb-compound to retry")
         if cfg["graph_b"]["cluster"] and graph_b_file.exists():
             record(step("graph B cluster", cluster_argv(graphify, concurrency_b),
                         cwd=str(exchanges), env=env, timeout=GRAPHIFY_TIMEOUT))

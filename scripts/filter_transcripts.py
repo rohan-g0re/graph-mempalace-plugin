@@ -28,6 +28,25 @@ and ordering by timestamp shifted the number of every later exchange in that
 session. Nothing is lost - the main transcript already carries each subagent's
 result as a task-notification turn.
 
+A session's LAST exchange is held back while that session may still be running.
+Every other exchange is final: the next user turn closed it, and the transcript
+only ever grows at the end. The last one is still growing while the session is
+live, and the chain does run then (on PreCompact mid-turn, on a manual compound
+mid-turn, and from other sessions). Filing it early means later runs rewrite it
+with more content, Graphify re-extracts it, and Graphify's shrink guard refuses
+to save the whole chat graph whenever that re-extraction yields fewer nodes for
+the file than last time. LLM output varies run to run, so the graph can stay
+stuck for days. So: when the transcript was modified within
+OPEN_EXCHANGE_QUIET_SECONDS of now, its last exchange is "open" and this run
+neither writes nor overwrites its file. If an earlier run already wrote that
+file, the file is left exactly as it is and keeps its `_index.jsonl` row, so the
+resolver never loses a file that exists. A session quiet for longer than the
+window is treated as finished and its last exchange is written. Holding back
+never changes a number: the exchange keeps its id and is filed under it later.
+
+An exchange file is only rewritten when its content changed. Rewriting every
+file on every run churned their mtimes for nothing.
+
 Keeps: user text and assistant text.
 Drops: tool_result, tool_use inputs, thinking, images, attachments, meta lines,
        sidechain (subagent) rows, and compaction summaries (lossy restatement
@@ -41,6 +60,11 @@ Writes, into <output-dir>:
 
 The last line of stdout is stable and parseable:
     filter: <N> exchanges, <M> turns, <K> sessions -> <output-dir>
+<N> is the number of exchanges `_index.jsonl` lists after this run, which is
+the number of exchange files on disk that it stands behind: files left
+unchanged count, and so does a held-back exchange's file from an earlier run.
+<M> is the turns in those exchanges. A held-back exchange with no file yet is in
+neither; the `held back` line above the summary counts it.
 
 Usage:
     python filter_transcripts.py <transcript-dir> <output-dir>
@@ -64,6 +88,7 @@ import gm_common  # noqa: E402,F401  (imported for its UTF-8 stream setup)
 import glob  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
+import time  # noqa: E402
 from collections import defaultdict  # noqa: E402
 
 # Noise that survives the structural filter: hook injections, local command
@@ -76,6 +101,14 @@ NOISE = re.compile(
 )
 MIN_CHARS = 40          # a turn shorter than this carries no retrievable content
 MIN_EXCHANGE_CHARS = 200  # an exchange below this is not worth a node
+
+# How long a transcript must have gone unmodified before its session counts as
+# finished, so its last exchange can be filed. A live session writes to its
+# transcript on every turn and every tool call, so half an hour of silence means
+# nobody is adding to that exchange. Too short a window files an exchange that
+# is still growing, which is what jams Graphify's shrink guard; too long only
+# delays filing the last exchange of a session that really did end.
+OPEN_EXCHANGE_QUIET_SECONDS = 30 * 60
 
 # What the exchanges directory must hide from `mempalace mine`: Graphify's own
 # output and the resolver's lookup table.
@@ -203,10 +236,123 @@ def ensure_gitignore(out_dir: str) -> None:
         f.write(prefix + "".join(f"{line}\n" for line in missing))
 
 
-def run(transcript_dir: str, out_dir: str) -> int:
-    """Turn every transcript under transcript_dir into exchange files under out_dir."""
+def write_if_changed(path: str, text: str) -> bool:
+    """Write text to path unless the file already holds exactly these bytes.
+
+    Returns True when the file was written. An unchanged file keeps its mtime,
+    so nothing downstream sees it as touched. The new bytes go to a temporary
+    file beside the target and are moved over it in one step, so a reader (the
+    resolver, Graphify, the mine) never sees a half-written exchange.
+    """
+    data = text.encode("utf-8")
+    try:
+        with open(path, "rb") as f:
+            if f.read() == data:
+                return False
+    except OSError:
+        pass  # missing or unreadable: write it
+    # A dot name, so a temp file left by a crash is not taken for an exchange.
+    # open() rather than mkstemp: the file then gets the usual umask mode, as
+    # the exchange files always have, not mkstemp's owner-only 0600.
+    tmp = os.path.join(os.path.dirname(path) or ".",
+                       f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except OSError:
+        # Windows refuses to replace a file another process has open. Writing
+        # in place is what this script always did, so fall back to that rather
+        # than fail the run.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        with open(path, "wb") as f:
+            f.write(data)
+    return True
+
+
+def read_index(out_dir: str) -> dict[str, dict]:
+    """id -> row from the _index.jsonl an earlier run wrote. Empty when absent.
+
+    Read before this run replaces it, so a held-back exchange whose file an
+    earlier run wrote can keep the row that describes that file exactly.
+    """
+    rows: dict[str, dict] = {}
+    try:
+        with open(os.path.join(out_dir, "_index.jsonl"), encoding="utf-8",
+                  errors="replace") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("id"), str):
+                    rows[row["id"]] = row
+    except OSError:
+        pass
+    return rows
+
+
+def turns_in_file(path: str) -> int | None:
+    """The `turns:` count from an exchange file's frontmatter, or None."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("turns: "):
+                    return int(line[len("turns: "):].strip())
+                if line.startswith("# "):
+                    break  # past the frontmatter
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def session_is_live(path: str, now: float) -> bool:
+    """True when the transcript was modified within the quiet window.
+
+    A transcript whose mtime cannot be read counts as live: holding an
+    exchange back costs one run of delay, while filing one that is still
+    growing can jam the chat graph.
+    """
+    try:
+        return now - os.path.getmtime(path) < OPEN_EXCHANGE_QUIET_SECONDS
+    except OSError:
+        return True
+
+
+def render(eid: str, sess: str, day: str, topic: str,
+           ex: list[tuple[str, str, str]]) -> str:
+    """The markdown for one exchange: frontmatter, a title, then each turn."""
+    doc = [
+        "---",
+        f"id: {eid}",
+        f"session: {sess}",
+        f"date: {day}",
+        f"started: {ex[0][0]}",
+        f"turns: {len(ex)}",
+        f"topic: {json.dumps(topic)}",
+        "---",
+        "",
+        f"# Exchange {eid}",
+        "",
+    ]
+    for ts, role, txt in ex:
+        doc += [f"## {role} — {ts}", "", txt, ""]
+    return "\n".join(doc)
+
+
+def run(transcript_dir: str, out_dir: str, now: float | None = None) -> int:
+    """Turn every transcript under transcript_dir into exchange files under out_dir.
+
+    `now` is the clock the quiet window is measured against; tests pass it so
+    they need not sleep. It defaults to the real time.
+    """
+    now = time.time() if now is None else now
     os.makedirs(out_dir, exist_ok=True)
     ensure_gitignore(out_dir)
+    previous_index = read_index(out_dir)
 
     # Top-level session transcripts only. Subagent transcripts under
     # <transcript-dir>/<session>/ are deliberately left out: they are written
@@ -216,77 +362,98 @@ def run(transcript_dir: str, out_dir: str) -> int:
     files = sorted(glob.glob(os.path.join(transcript_dir, "*.jsonl")))
 
     by_session: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    live: dict[str, bool] = {}
     for fp in files:
         sess = os.path.splitext(os.path.basename(fp))[0]
         by_session[sess].extend(harvest(fp))
+        live[sess] = session_is_live(fp, now)
 
-    written = kept_turns = kept_bytes = 0
+    indexed = changed = held_back = kept_turns = kept_bytes = 0
     index = []
     for sess, turns in sorted(by_session.items()):
         if not turns:
             continue
         turns.sort(key=lambda x: x[0])
         s8 = sess[:8]
-        for n, ex in enumerate(to_exchanges(turns), 1):
+        exchanges = to_exchanges(turns)
+        for n, ex in enumerate(exchanges, 1):
+            eid = f"{s8}-{n:04d}"
+            day = ex[0][0][:10] or "unknown"
+            first_user = next((t[2] for t in ex if t[1].startswith("USER")), ex[0][2])
+            topic = " ".join(first_user.split())[:120]
+            fn = os.path.join(out_dir, f"{day}-{eid}.md")
+
+            # The last exchange of a live session is still growing. Its size is
+            # not final either, so this check comes before the size floor: a
+            # short last exchange is still the open one, and the one before it
+            # is final.
+            if n == len(exchanges) and live.get(sess, True):
+                held_back += 1
+                if not os.path.exists(fn):
+                    continue  # never filed, so nothing to index yet
+                # Filed by an earlier run: leave the file alone and keep the row
+                # describing it, so the resolver can still find it. Prefer that
+                # run's own row; failing that, the transcript is append-only, so
+                # the file holds this exchange's first `turns:` turns.
+                row = previous_index.get(eid)
+                if not row or row.get("file") != os.path.basename(fn):
+                    k = turns_in_file(fn)
+                    part = ex[:k] if k and 0 < k <= len(ex) else ex
+                    row = {"id": eid, "session": sess, "date": day,
+                           "file": os.path.basename(fn), "turns": len(part),
+                           "chars": sum(len(t[2]) for t in part), "topic": topic}
+                index.append(row)
+                indexed += 1
+                kept_turns += int(row.get("turns") or 0)
+                try:
+                    kept_bytes += os.path.getsize(fn)
+                except OSError:
+                    pass  # only feeds the size line; never worth the run
+                continue
+
             body_chars = sum(len(t[2]) for t in ex)
             if body_chars < MIN_EXCHANGE_CHARS:
                 continue
-            eid = f"{s8}-{n:04d}"
-            start = ex[0][0]
-            day = start[:10] or "unknown"
-            first_user = next((t[2] for t in ex if t[1].startswith("USER")), ex[0][2])
-            topic = " ".join(first_user.split())[:120]
-
-            doc = [
-                "---",
-                f"id: {eid}",
-                f"session: {sess}",
-                f"date: {day}",
-                f"started: {start}",
-                f"turns: {len(ex)}",
-                f"topic: {json.dumps(topic)}",
-                "---",
-                "",
-                f"# Exchange {eid}",
-                "",
-            ]
-            for ts, role, txt in ex:
-                doc += [f"## {role} — {ts}", "", txt, ""]
-            out = "\n".join(doc)
-
-            fn = os.path.join(out_dir, f"{day}-{eid}.md")
-            with open(fn, "w", encoding="utf-8", newline="\n") as f:
-                f.write(out)
+            out = render(eid, sess, day, topic, ex)
+            if write_if_changed(fn, out):
+                changed += 1
             index.append({"id": eid, "session": sess, "date": day,
                           "file": os.path.basename(fn), "turns": len(ex),
                           "chars": body_chars, "topic": topic})
-            written += 1
+            indexed += 1
             kept_turns += len(ex)
             kept_bytes += len(out)
 
-    # The index is the resolver's lookup table: id -> file, and back.
+    # The index is the resolver's lookup table: id -> file, and back. It is
+    # written last on every run, even when unchanged, because its presence is
+    # how session_start tells "a filter pass finished" from "never ingested".
     with open(os.path.join(out_dir, "_index.jsonl"), "w", encoding="utf-8", newline="\n") as f:
         for row in index:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     sessions = len(by_session)
     print(f"sessions         : {sessions}")
-    print(f"exchanges written: {written}")
+    print(f"exchanges written: {indexed}")
+    print(f"files changed    : {changed}")
+    print(f"held back        : {held_back} open exchange(s)")
     print(f"turns kept       : {kept_turns}")
     print(f"dialogue size    : {kept_bytes/1e6:.2f} MB")
     print(f"index            : {os.path.join(out_dir, '_index.jsonl')}")
     # The one line other scripts parse. Keep its shape.
-    print(f"filter: {written} exchanges, {kept_turns} turns, {sessions} sessions -> {out_dir}")
+    print(f"filter: {indexed} exchanges, {kept_turns} turns, {sessions} sessions -> {out_dir}")
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Parse the two positional arguments and run. 2 means the arguments were wrong."""
+def main(argv: list[str] | None = None, now: float | None = None) -> int:
+    """Parse the two positional arguments and run. 2 means the arguments were wrong.
+
+    `now` is passed through to run() for tests; the command line never sets it.
+    """
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 2 or args[0] in ("-h", "--help"):
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    return run(args[0], args[1])
+    return run(args[0], args[1], now=now)
 
 
 if __name__ == "__main__":

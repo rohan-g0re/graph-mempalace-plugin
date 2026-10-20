@@ -361,6 +361,10 @@ needs part of the chain: the one-time 0.1.0 palace move runs `--only mine`.
 1. `lock_acquire()`; if held and fresh, print and exit 0. Everything below is in
    `try/finally: lock_release()`.
 2. Filter: `filter_transcripts.py <transcripts> <exchanges>`.
+   The last exchange of a session whose transcript changed in the last 30
+   minutes is held back: it is still growing, and a file that grows after it
+   was extracted trips Graphify's shrink guard. It is filed on a later run
+   under the same id. Files whose text did not change are not rewritten.
 3. Mine: `mempalace --palace <palace> mine <exchanges> --mode projects --wing <wing>`.
    `--palace` is a global flag, so it comes before the subcommand.
 4. Graph A: if `graphify-out/graph.json` is missing under the repo, `graphify . --code-only`;
@@ -368,7 +372,12 @@ needs part of the chain: the one-time 0.1.0 palace move runs `--only mine`.
    instead. `cluster-only` if `graph_a.cluster`.
 5. Graph B: in the exchanges dir, `graphify . --backend claude-cli --max-concurrency N --token-budget M`,
    repeated up to `graph_b.passes` times while the output reports files that
-   produced no nodes. Then `cluster-only` if `graph_b.cluster`.
+   produced no nodes. A pass that Graphify's shrink guard refuses
+   (`unverified semantic shrink detected`) is run once more with
+   `--allow-partial`: an exchange only changes when its text changed, so fewer
+   nodes is not lost data. Graph B counts as failed when no pass wrote the
+   graph this run, even if an older graph is on disk. Then `cluster-only` if
+   `graph_b.cluster`.
 6. Sweep: kill `claude` worker processes older than 10 minutes whose parent is
    gone (Windows orphan on timeout).
 7. Summary line to the log and, with `--wait`, to stdout: exchanges, drawers added,

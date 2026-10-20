@@ -13,20 +13,25 @@ class FakeProc:
     """Stands in for a Popen. `communicate` returns on the first heartbeat tick,
     so `run_step`'s wait loop finishes at once and never sleeps or kills."""
 
-    def __init__(self, out="", rc=0):
+    def __init__(self, out="", rc=0, err=""):
         self._out = out
+        self._err = err
         self.returncode = rc
         self.killed = False
 
     def communicate(self, timeout=None):
-        return self._out, ""
+        return self._out, self._err
 
     def kill(self):
         self.killed = True
 
 
-def install_runner(monkeypatch, cr, stdout=None, rc=None):
-    """Replace the subprocess launcher with a recorder returning canned output."""
+def install_runner(monkeypatch, cr, stdout=None, rc=None, stderr=None):
+    """Replace the subprocess launcher with a recorder returning canned output.
+
+    `stderr` matters for Graphify: its warnings and refusals go to stderr, so a
+    decision taken on them is only tested if the fake writes them there too.
+    """
     calls: list = []
 
     def fake_popen(argv, **kwargs):
@@ -36,7 +41,8 @@ def install_runner(monkeypatch, cr, stdout=None, rc=None):
         # is what keeps a mempalace child process in this project's palace.
         calls.append(SimpleNamespace(argv=argv, cwd=cwd, env=kwargs.get("env") or {}))
         return FakeProc(stdout(argv, cwd) if stdout else "",
-                        rc(argv, cwd) if rc else 0)
+                        rc(argv, cwd) if rc else 0,
+                        stderr(argv, cwd) if stderr else "")
 
     monkeypatch.setattr(cr.subprocess, "Popen", fake_popen)
     return calls
@@ -285,14 +291,170 @@ def test_an_interrupted_graph_b_pass_is_retried_once(chain, capsys, monkeypatch)
     assert result["failed"] == ["graph B"]
 
 
-def test_a_failing_graph_b_that_still_wrote_a_graph_is_not_a_failure(chain, capsys,
-                                                                     monkeypatch):
-    chain.write_graph(chain.gm.graph_b_path(chain.project))
+def test_a_failing_graph_b_over_an_old_graph_is_still_a_failure(chain, capsys,
+                                                                monkeypatch):
+    """Regression: an old graph.json on disk hid every failed run behind
+    status=ok, and the chat graph stayed frozen for days without a warning."""
+    chain.write_graph(chain.gm.graph_b_path(chain.project), nodes=168)
     install_runner(monkeypatch, chain.cr,
                    rc=lambda argv, cwd: 2 if is_extraction(argv) else 0)
     result = result_of(chain, capsys)
+    assert result["failed"] == ["graph B"]
+    assert result["status"] == "failed:graph_B"
+    assert ("graph B was not updated (rc=2); the chat graph is stale; "
+            "run /graph-mempalace:kb-compound to retry") in result["notes"]
+    assert not any("did not produce a graph" in n for n in result["notes"])
+    assert "status=failed:graph_B ===" in chain.log()
+    # The old graph is still there, so it is still clustered.
+    assert "graph B cluster" in step_names(result)
+
+
+def test_a_later_failing_pass_after_a_good_one_is_not_a_failure(chain, capsys,
+                                                                 monkeypatch):
+    """Pass 1 wrote the graph; pass 2 only failed to fill in the gaps."""
+    chain.write_graph(chain.gm.graph_b_path(chain.project))
+    passes: list = []
+
+    def stdout(argv, cwd):
+        if not is_extraction(argv):
+            return ""
+        passes.append(1)
+        return "5/10 dispatched file(s) produced no nodes\n" if len(passes) == 1 else ""
+
+    def rc(argv, cwd):
+        return 1 if is_extraction(argv) and len(passes) == 2 else 0
+
+    install_runner(monkeypatch, chain.cr, stdout, rc)
+    result = result_of(chain, capsys)
+    assert step_names(result) == ["filter", "mine", "graph A", "graph B pass 1",
+                                  "graph B pass 2", "graph B cluster"]
+    assert "graph B pass 2 failed (rc=1)" in result["notes"]
     assert result["failed"] == []
-    assert "status=ok ===" in chain.log()
+    assert result["status"] == "ok"
+    assert result["omitted"] == 5
+
+
+# ------------------------------------------------ graphify's shrink guard
+
+# Graphify prints these to stderr; the fake does the same, so the match is
+# proven to see stderr and not only stdout.
+SHRINK = ("[graphify extract] semantic extraction is incomplete: unverified semantic "
+          "shrink detected for '2026-10-17-388c2c70-0019.md' (14 -> 13 nodes). The "
+          "shrink guard stays armed for this write; pass --allow-partial to "
+          "overwrite a larger existing graph anyway.\n"
+          "[graphify extract] error: extraction was incomplete (an AST/semantic pass "
+          "failed) and the resulting graph is smaller than the existing graph.json. "
+          "Refusing to overwrite a complete graph with a partial one.\n")
+
+
+def extractions(calls):
+    return [c.argv for c in plan(calls) if is_extraction(c.argv)]
+
+
+def scripted_graph_b(outcomes):
+    """Runner callables that play `outcomes` in order, one (rc, stdout, stderr)
+    per extraction. Every other command succeeds silently. `stdout` is called
+    first for each command, so it is the one that advances the script."""
+    seen: list = []
+
+    def stdout(argv, cwd):
+        if not is_extraction(argv):
+            return ""
+        seen.append(1)
+        return outcomes[len(seen) - 1][1]
+
+    def stderr(argv, cwd):
+        return outcomes[len(seen) - 1][2] if is_extraction(argv) else ""
+
+    def rc(argv, cwd):
+        return outcomes[len(seen) - 1][0] if is_extraction(argv) else 0
+
+    return dict(stdout=stdout, stderr=stderr, rc=rc)
+
+
+def test_a_shrink_refusal_is_retried_once_with_allow_partial(chain, capsys,
+                                                             monkeypatch):
+    chain.write_graph(chain.gm.graph_b_path(chain.project))
+    calls = install_runner(monkeypatch, chain.cr, **scripted_graph_b([
+        (1, "", SHRINK),                                            # refused
+        (0, "", "[graphify] WARNING: 3/20 dispatched file(s) produced no nodes\n"),
+        (0, "", "[graphify] WARNING: 0/3 dispatched file(s) produced no nodes\n"),
+    ]))
+    result = result_of(chain, capsys)
+    argvs = extractions(calls)
+    assert len(argvs) == 3
+    assert "--allow-partial" not in argvs[0]
+    assert argvs[1] == argvs[0] + ["--allow-partial"]
+    # The retry did not use up a pass, and pass 2 is an ordinary pass again.
+    assert "--allow-partial" not in argvs[2]
+    assert step_names(result)[3:6] == ["graph B pass 1", "graph B pass 1",
+                                       "graph B pass 2"]
+    assert any("fewer nodes than before" in n
+               and "retrying pass 1 once with --allow-partial" in n
+               for n in result["notes"])
+    assert result["failed"] == []
+    assert result["status"] == "ok"
+    assert result["omitted"] == 0
+
+
+def test_omitted_comes_from_the_allow_partial_retry(chain, capsys, monkeypatch,
+                                                    write_config):
+    write_config("[graph_b]\npasses = 1\n")
+    chain.write_graph(chain.gm.graph_b_path(chain.project))
+    install_runner(monkeypatch, chain.cr, **scripted_graph_b([
+        (1, "", "[graphify] WARNING: 10/20 dispatched file(s) produced no nodes\n"
+                + SHRINK),
+        (0, "", "[graphify] WARNING: 4/20 dispatched file(s) produced no nodes\n"),
+    ]))
+    result = result_of(chain, capsys)
+    assert result["omitted"] == 4         # the pass that wrote, not the refused one
+    assert result["status"] == "ok"
+    line = [ln for ln in chain.log().splitlines() if "=== compound done" in ln][-1]
+    assert "omitted=4 " in line
+
+
+def test_a_failure_without_the_shrink_text_is_not_retried(chain, capsys,
+                                                          monkeypatch):
+    chain.write_graph(chain.gm.graph_b_path(chain.project))
+    calls = install_runner(monkeypatch, chain.cr, **scripted_graph_b([
+        (1, "", "[graphify extract] error: dedup merged 3 node(s); refusing\n"),
+    ]))
+    result = result_of(chain, capsys)
+    argvs = extractions(calls)
+    assert len(argvs) == 1
+    assert "--allow-partial" not in argvs[0]
+    assert result["failed"] == ["graph B"]
+
+
+def test_a_failed_shrink_retry_is_a_failure_and_is_not_retried_again(chain, capsys,
+                                                                     monkeypatch):
+    chain.write_graph(chain.gm.graph_b_path(chain.project))
+    calls = install_runner(monkeypatch, chain.cr, **scripted_graph_b([
+        (1, "", SHRINK),
+        (1, "", SHRINK),
+        (0, "", ""),                      # must never be reached
+    ]))
+    result = result_of(chain, capsys)
+    argvs = extractions(calls)
+    assert len(argvs) == 2
+    assert sum("--allow-partial" in a for a in argvs) == 1
+    assert result["failed"] == ["graph B"]
+    assert result["status"] == "failed:graph_B"
+    assert any("graph B was not updated (rc=1)" in n for n in result["notes"])
+
+
+def test_an_interrupted_shrink_retry_keeps_allow_partial(chain, capsys, monkeypatch):
+    """The interrupted retry repeats exactly the command that was interrupted."""
+    chain.write_graph(chain.gm.graph_b_path(chain.project))
+    calls = install_runner(monkeypatch, chain.cr, **scripted_graph_b([
+        (1, "", SHRINK),
+        (130, "", ""),
+        (0, "", ""),
+    ]))
+    result = result_of(chain, capsys)
+    argvs = extractions(calls)
+    assert ["--allow-partial" in a for a in argvs] == [False, True, True]
+    assert result["status"] == "ok"
 
 
 # ------------------------------------------------------------------- skip paths

@@ -7,6 +7,23 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions are pinned: Claude Code treats `version` in `plugin.json` as the signal
 that an update exists, so a release bumps it and adds an entry here in one commit.
 
+## [Unreleased]
+
+### Fixed
+
+- The chat graph (Graph B) could stop updating for good while every compound
+  reported `status=ok`. An exchange filed while its session was still running
+  kept growing. Graphify then re-extracted it, got fewer nodes on some runs,
+  and its shrink guard refused to write the graph, every run after that.
+- `filter_transcripts.py` holds back the last exchange of a session whose
+  transcript changed in the last 30 minutes. A later run files it under the same
+  id. Exchange files whose text did not change are no longer rewritten.
+- `compound_run.py` re-runs a Graph B pass once with `--allow-partial` when
+  Graphify's shrink guard refuses it.
+- `compound_run.py` marks Graph B as failed when no pass wrote the graph this
+  run, even if an older graph is on disk. The SessionStart line then says
+  `last compound FAILED (graph B)` instead of hiding a stale chat graph.
+
 ## [0.2.0] - 2026-10-10
 
 ### Added
